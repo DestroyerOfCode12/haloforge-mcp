@@ -12,6 +12,10 @@ export const ticketTypesConfig: ResourceConfig = {
   description: "ticket type",
   readPermission: "Agent",
   writePermission: "Admin",
+  mergeRules: {
+    fields: ["fieldid", "id"],
+    userfields: ["fieldid", "id"],
+  },
   listParams: {
     count: z.number().int().optional().describe("Number of results"),
   },

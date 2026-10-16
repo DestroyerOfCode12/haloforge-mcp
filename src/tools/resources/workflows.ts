@@ -12,6 +12,10 @@ export const workflowsConfig: ResourceConfig = {
   description: "workflow",
   readPermission: "Agent",
   writePermission: "Admin",
+  mergeRules: {
+    steps: ["id", "step_id"],
+    stages: ["id"],
+  },
   listParams: {
     includedetails: z.boolean().optional().describe("Include extra details"),
   },

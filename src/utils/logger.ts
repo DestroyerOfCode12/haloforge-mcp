@@ -1,7 +1,10 @@
 /**
- * Halo ITSM MCP Server - Logger
+ * HaloForge MCP | Logger
  * Writes to stderr to avoid polluting MCP stdio transport on stdout.
+ * Sensitive keys are redacted and registered secrets are masked.
  */
+
+import { maskSecrets, redact } from "./secrets.js";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -15,7 +18,7 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 let currentLevel: LogLevel = "info";
 
 export function setLogLevel(level: LogLevel): void {
-  currentLevel = level;
+  currentLevel = LEVEL_ORDER[level] === undefined ? "info" : level;
 }
 
 function shouldLog(level: LogLevel): boolean {
@@ -24,24 +27,8 @@ function shouldLog(level: LogLevel): boolean {
 
 function formatMessage(level: LogLevel, message: string, data?: Record<string, unknown>): string {
   const ts = new Date().toISOString();
-  const base = `[${ts}] [${level.toUpperCase()}] ${message}`;
-  if (data) {
-    // Redact sensitive fields (snake_case and camelCase variants)
-    const safe = { ...data };
-    const sensitiveKeys = [
-      "access_token", "accessToken",
-      "refresh_token", "refreshToken",
-      "id_token", "idToken",
-      "client_secret", "clientSecret",
-      "password", "token", "authorization",
-      "secret", "api_key", "apiKey",
-      "bearer", "credential", "credentials",
-    ];
-    for (const key of sensitiveKeys) {
-      if (key in safe) safe[key] = "***REDACTED***";
-    }
-    return `${base} ${JSON.stringify(safe)}`;
-  }
+  const base = `[${ts}] [${level.toUpperCase()}] ${maskSecrets(message)}`;
+  if (data) return `${base} ${maskSecrets(JSON.stringify(redact(data)))}`;
   return base;
 }
 

@@ -1,37 +1,42 @@
 {
-  "name": "halo-itsm-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server for Halo ITSM - complete API integration for AI assistants",
+  "name": "haloforge-mcp",
+  "version": "2.0.0",
+  "description": "MCP server for HaloITSM that can read and safely configure everything an administrator can configure. Based on halo-itsm-mcp (MIT).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "halo-itsm-mcp": "dist/index.js"
+    "haloforge-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
+    "dev": "tsx src/index.ts",
     "clean": "rm -rf dist",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:integration": "RUN_INTEGRATION=1 vitest run tests/integration",
+    "coverage-matrix": "tsx scripts/coverage-matrix.ts",
     "prepare": "npm run build"
   },
   "keywords": [
     "mcp",
     "halo",
+    "haloitsm",
     "itsm",
-    "helpdesk",
     "service-desk",
+    "configuration",
     "ai"
   ],
-  "author": "City of San Marcos, CA - IT Division",
+  "author": "HaloForge MCP contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/omichelbraga/halo-itsm-mcp.git"
+    "url": "https://github.com/DestroyerOfCode12/haloforge-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/omichelbraga/halo-itsm-mcp/issues"
+    "url": "https://github.com/DestroyerOfCode12/haloforge-mcp/issues"
   },
-  "homepage": "https://github.com/omichelbraga/halo-itsm-mcp#readme",
+  "homepage": "https://github.com/DestroyerOfCode12/haloforge-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "undici": "^6.29.1",

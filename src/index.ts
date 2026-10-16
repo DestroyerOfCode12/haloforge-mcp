@@ -1,26 +1,22 @@
 #!/usr/bin/env node
 
 /**
- * Halo ITSM MCP Server
+ * HaloForge MCP
  *
- * Complete MCP server for Halo ITSM platform.
- * Exposes 172 tools across 43 resource domains.
+ * MCP server for HaloITSM that can read and safely configure an instance.
+ * Based on halo-itsm-mcp (MIT).
  *
  * Transport modes:
- *   - stdio  (default): For Claude Desktop / Claude Code local use
- *   - http:  For Docker / remote deployment (Streamable HTTP + SSE)
+ *   - stdio  (default): for Claude Desktop and Claude Code local use
+ *   - http:  for Docker or remote deployment (Streamable HTTP + SSE)
  *
  * Authentication modes:
- *   - env:   Client ID + Secret from environment variables (default)
- *   - oauth: Proxied OAuth2 via MCP protocol (Claude connector UI)
+ *   - env:   Client ID and Secret from environment variables (default)
+ *   - oauth: proxied OAuth2 via the MCP protocol (Claude connector UI)
  *
- * The server always runs plain HTTP. TLS is handled by your reverse proxy
- * (nginx, Caddy, Traefik, etc.) in production.
- *
- * Usage:
- *   stdio:       node dist/index.js
- *   http:        MCP_TRANSPORT=http node dist/index.js
- *   http+oauth:  MCP_TRANSPORT=http MCP_AUTH=oauth node dist/index.js
+ * Safety: HALO_MODE=read (default), write or full; HALO_DISABLE_DELETE=true
+ * by default; optional HALO_WRITE_ALLOWLIST. Several instances with
+ * HALO_INSTANCES=trial,prod.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -29,11 +25,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import type { OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import express from "express";
-import { z } from "zod";
 
 // ==================== SECURITY HEADERS ====================
 
@@ -56,8 +50,11 @@ function securityHeaders(): express.RequestHandler {
     next();
   };
 }
-import { loadConfig, validateUrl, type HaloConfig } from "./types/config.js";
+import { loadInstances, loadOAuthInstance, validateUrl, type HaloConfig } from "./types/config.js";
 import { HaloClient } from "./client/halo-client.js";
+import { InstanceManager } from "./client/instance-manager.js";
+import { AuditLog } from "./safety/audit.js";
+import { configureProxy } from "./utils/proxy.js";
 import {
   createHaloOAuthProvider,
   captureClientSecret,
@@ -76,25 +73,25 @@ import type { Request, Response, RequestHandler } from "express";
 
 // ==================== MCP SERVER FACTORY ====================
 
-function createHaloMcpServer(client: HaloClient, config: HaloConfig): McpServer {
-  const toolMap = buildAllTools(client);
-  const resources = buildResources(client, config);
+export const SERVER_NAME = "haloforge-mcp";
+export const SERVER_VERSION = "2.0.0";
+
+const audit = new AuditLog();
+
+export function createHaloMcpServer(manager: InstanceManager): McpServer {
+  const toolMap = buildAllTools(manager, audit);
+  const resources = buildResources(manager);
 
   const server = new McpServer({
-    name: "halo-itsm",
-    version: "1.0.0",
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
   });
 
   for (const [name, tool] of toolMap) {
-    server.tool(
-      name,
-      tool.description,
-      (tool.inputSchema as z.ZodObject<z.ZodRawShape>).shape,
-      async (args: Record<string, unknown>) => {
-        logger.debug(`Tool called: ${name}`, { args: Object.keys(args) });
-        return await tool.handler(args);
-      }
-    );
+    server.tool(name, tool.description, tool.shape, async (args: Record<string, unknown>) => {
+      logger.debug(`Tool called: ${name}`, { args: Object.keys(args) });
+      return await tool.handler(args);
+    });
   }
 
   for (const resource of resources) {
@@ -118,29 +115,23 @@ function createHaloMcpServer(client: HaloClient, config: HaloConfig): McpServer 
 // ==================== TOKEN-AWARE CLIENT ====================
 
 function createOAuthClient(baseUrl: string): { client: HaloClient; config: HaloConfig } {
-  const config: HaloConfig = {
-    baseUrl: baseUrl.replace(/\/+$/, ""),
-    clientId: "oauth-proxy",
-    clientSecret: "unused",
-    scope: "all",
-    logLevel: (process.env.LOG_LEVEL as HaloConfig["logLevel"]) || "info",
-  };
+  const config = loadOAuthInstance(baseUrl);
   return { client: new HaloClient(config), config };
 }
 
 // ==================== STDIO TRANSPORT ====================
 
-async function startStdio(client: HaloClient, config: HaloConfig): Promise<void> {
-  const server = createHaloMcpServer(client, config);
+async function startStdio(manager: InstanceManager): Promise<void> {
+  const server = createHaloMcpServer(manager);
   const transport = new StdioServerTransport();
   logger.info("Connecting via stdio transport...");
   await server.connect(transport);
-  logger.info("Halo ITSM MCP Server running (stdio). Waiting for requests.");
+  logger.info("HaloForge MCP running (stdio). Waiting for requests.");
 }
 
 // ==================== HTTP TRANSPORT (ENV AUTH) ==============
 
-async function startHttp(client: HaloClient, config: HaloConfig): Promise<void> {
+async function startHttp(manager: InstanceManager): Promise<void> {
   const port = parseInt(process.env.MCP_PORT || "3000", 10);
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.set("trust proxy", 1);
@@ -152,13 +143,10 @@ async function startHttp(client: HaloClient, config: HaloConfig): Promise<void> 
     res.json({ status: "ok" });
   });
 
-  setupMcpRoutes(app, transports, (req, res) => {
-    const server = createHaloMcpServer(client, config);
-    return server;
-  });
+  setupMcpRoutes(app, transports, () => createHaloMcpServer(manager));
 
   app.listen(port, () => {
-    logger.info(`Halo ITSM MCP Server running (HTTP) on port ${port}`);
+    logger.info(`HaloForge MCP running (HTTP) on port ${port}`);
     logger.info(`  MCP endpoint:    http://0.0.0.0:${port}/mcp`);
     logger.info(`  Health check:    http://0.0.0.0:${port}/health`);
   });
@@ -220,7 +208,7 @@ async function startHttpWithOAuth(haloBaseUrl: string): Promise<void> {
     issuerUrl: serverUrl,
     baseUrl: serverUrl,
     scopesSupported: ["all"],
-    resourceName: "Halo ITSM MCP Server",
+    resourceName: "HaloForge MCP",
     resourceServerUrl: mcpEndpoint,
   }));
 
@@ -233,7 +221,7 @@ async function startHttpWithOAuth(haloBaseUrl: string): Promise<void> {
       authorization_servers: [serverUrl.href],
       scopes_supported: ["all"],
       bearer_methods_supported: ["header"],
-      resource_name: "Halo ITSM MCP Server",
+      resource_name: "HaloForge MCP",
     });
   });
 
@@ -267,7 +255,7 @@ async function startHttpWithOAuth(haloBaseUrl: string): Promise<void> {
       }
     }
 
-    return createHaloMcpServer(client, config);
+    return createHaloMcpServer(new InstanceManager([config], config.name, undefined, new Map([[config.name, client]])));
   }, authMiddleware as RequestHandler,
   // Bind session to credentials on init for cleanup tracking
   (sessionId: string, req: Request) => {
@@ -283,7 +271,7 @@ async function startHttpWithOAuth(haloBaseUrl: string): Promise<void> {
 
   // Plain HTTP - reverse proxy handles TLS
   app.listen(port, () => {
-    logger.info(`Halo ITSM MCP Server running (HTTP + OAuth proxy) on port ${port}`);
+    logger.info(`HaloForge MCP running (HTTP + OAuth proxy) on port ${port}`);
     logger.info(`  Internal:        http://0.0.0.0:${port}/mcp`);
     logger.info(`  Public URL:      ${publicUrl}/mcp`);
     logger.info(`  Health check:    http://0.0.0.0:${port}/health`);
@@ -433,31 +421,35 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     setLogLevel((process.env.LOG_LEVEL as HaloConfig["logLevel"]) || "info");
-    logger.info("Starting Halo ITSM MCP Server (OAuth proxy mode)", { instance: baseUrl });
+    if (configureProxy()) logger.info("Using the outbound proxy from HTTPS_PROXY or HTTP_PROXY");
+    logger.info("Starting HaloForge MCP (OAuth proxy mode)", { instance: baseUrl });
     await startHttpWithOAuth(baseUrl.replace(/\/+$/, ""));
     return;
   }
 
   // Standard mode: needs full credentials in env
-  let config;
+  let loaded;
   try {
-    config = loadConfig();
+    loaded = loadInstances();
   } catch (err) {
     process.stderr.write(`Configuration error: ${(err as Error).message}\n`);
-    process.stderr.write("Set HALO_BASE_URL, HALO_CLIENT_ID, and HALO_CLIENT_SECRET environment variables.\n");
-    process.stderr.write('Or use MCP_AUTH=oauth mode (only requires HALO_BASE_URL).\n');
+    process.stderr.write("Or use MCP_AUTH=oauth with MCP_TRANSPORT=http (only requires HALO_BASE_URL).\n");
     process.exit(1);
   }
 
-  setLogLevel(config.logLevel);
-  logger.info("Starting Halo ITSM MCP Server", { instance: config.baseUrl, scope: config.scope });
+  setLogLevel(loaded.instances[0].logLevel);
+  if (configureProxy()) logger.info("Using the outbound proxy from HTTPS_PROXY or HTTP_PROXY");
+  logger.info("Starting HaloForge MCP", {
+    instances: loaded.instances.map((i) => `${i.name} (${i.mode})`).join(", "),
+    default: loaded.defaultName,
+  });
 
-  const client = new HaloClient(config);
+  const manager = new InstanceManager(loaded.instances, loaded.defaultName);
 
   if (transport === "http") {
-    await startHttp(client, config);
+    await startHttp(manager);
   } else {
-    await startStdio(client, config);
+    await startStdio(manager);
   }
 }
 

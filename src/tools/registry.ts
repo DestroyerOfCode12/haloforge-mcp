@@ -1,11 +1,18 @@
 /**
- * Halo ITSM MCP Server - Tool Registry
+ * HaloForge MCP | Tool Registry
  *
- * Registers all resource domains and their CRUD tools.
+ * Builds every tool, registers only those the configured instances allow
+ * (read mode registers no create or update tools; delete tools need full mode
+ * and HALO_DISABLE_DELETE=false), adds the optional instance argument and
+ * checks the selected instance's mode and allowlist on every call.
  */
 
-import { HaloClient } from "../client/halo-client.js";
-import { createResourceTools, ToolDefinition } from "./resource-factory.js";
+import { z, ZodRawShape } from "zod";
+import { InstanceManager } from "../client/instance-manager.js";
+import { createResourceTools, ToolDefinition, ToolResult, errorResult, successResult } from "./resource-factory.js";
+import { createApiRequestTool } from "./api-request.js";
+import { AuditLog } from "../safety/audit.js";
+import { ToolAccess, canDelete, canWrite, checkAccess, shouldRegister } from "../safety/policy.js";
 
 // Original resource configs
 import { createTicketsConfig } from "./resources/tickets.js";
@@ -58,22 +65,42 @@ import { downtimeConfig } from "./resources/downtime.js";
 
 import { logger } from "../utils/logger.js";
 
-/**
- * Build all tool definitions for all resources.
- */
-export function buildAllTools(client: HaloClient): Map<string, ToolDefinition> {
-  const toolMap = new Map<string, ToolDefinition>();
+export interface RegisteredTool {
+  name: string;
+  description: string;
+  access: ToolAccess;
+  shape: ZodRawShape;
+  handler: (args: Record<string, unknown>) => Promise<ToolResult>;
+}
 
-  // Agents needs the client reference for the custom /me tool
-  const agentsConfig = createAgentsConfig(client);
-  // Tickets needs the client reference for the custom SLA-detail tool
-  const ticketsConfig = createTicketsConfig(client);
+function createInstancesTool(): ToolDefinition {
+  return {
+    name: "halo_instances_list",
+    description: "List the configured Halo instances with their safety settings (mode, delete, write allowlist). Never shows credentials.",
+    inputSchema: z.object({}),
+    access: "read",
+    handler: async (_args, ctx) =>
+      successResult({
+        default_instance: ctx.manager.defaultName,
+        instances: ctx.manager.allConfigs().map((c) => ({
+          name: c.name,
+          base_url: c.baseUrl,
+          mode: c.mode,
+          can_write: canWrite(c),
+          can_delete: canDelete(c),
+          write_allowlist: c.writeAllowlist ? [...c.writeAllowlist] : null,
+        })),
+      }),
+  };
+}
 
+/** Every tool definition, before registration filtering. */
+export function allToolDefinitions(): ToolDefinition[] {
   const allConfigs = [
     // Core ITSM
-    ticketsConfig,
+    createTicketsConfig(),
     actionsConfig,
-    agentsConfig,
+    createAgentsConfig(),
     assetsConfig,
     clientsConfig,
     usersConfig,
@@ -120,16 +147,60 @@ export function buildAllTools(client: HaloClient): Map<string, ToolDefinition> {
     downtimeConfig,
   ];
 
-  for (const config of allConfigs) {
-    const tools = createResourceTools(config, client);
-    for (const tool of tools) {
-      if (toolMap.has(tool.name)) {
-        logger.warn(`Duplicate tool name: ${tool.name}. Overwriting.`);
-      }
-      toolMap.set(tool.name, tool);
-    }
-  }
+  const tools: ToolDefinition[] = [];
+  for (const config of allConfigs) tools.push(...createResourceTools(config));
+  tools.push(createApiRequestTool(), createInstancesTool());
+  return tools;
+}
 
-  logger.info(`Registered ${toolMap.size} tools across ${allConfigs.length} resource domains`);
+/**
+ * Wrap a tool so it resolves the instance and enforces the safety policy.
+ */
+export function wrapTool(tool: ToolDefinition, manager: InstanceManager, audit: AuditLog): RegisteredTool {
+  const names = manager.names();
+  const shape: ZodRawShape = {
+    ...tool.inputSchema.shape,
+    instance: z
+      .string()
+      .max(64)
+      .optional()
+      .describe(`Halo instance to use. Configured: ${names.join(", ")}. Default: ${manager.defaultName}.`),
+  };
+  return {
+    name: tool.name,
+    description: tool.description,
+    access: tool.access,
+    shape,
+    handler: async (rawArgs) => {
+      const { instance, ...args } = rawArgs as Record<string, unknown> & { instance?: string };
+      let resolved;
+      try {
+        resolved = manager.resolve(instance);
+      } catch (err) {
+        return errorResult((err as Error).message);
+      }
+      const { access, resources } = tool.accessFor ? tool.accessFor(args) : { access: tool.access, resources: tool.resources };
+      const dryRun = tool.supportsDryRun === true && access === "write" && args.dry_run === true;
+      const refusal = checkAccess(access, resolved.config, resources ?? [], dryRun);
+      if (refusal) return errorResult(refusal);
+      return tool.handler(args, { ...resolved, audit, toolName: tool.name, manager });
+    },
+  };
+}
+
+/**
+ * Build the tools to register for the configured instances.
+ */
+export function buildAllTools(manager: InstanceManager, audit: AuditLog = new AuditLog()): Map<string, RegisteredTool> {
+  const instances = manager.allConfigs();
+  const toolMap = new Map<string, RegisteredTool>();
+  const definitions = allToolDefinitions();
+  for (const tool of definitions) {
+    if (!shouldRegister(tool.access, instances)) continue;
+    if (toolMap.has(tool.name)) logger.warn(`Duplicate tool name: ${tool.name}. Overwriting.`);
+    toolMap.set(tool.name, wrapTool(tool, manager, audit));
+  }
+  const modes = instances.map((i) => `${i.name}=${i.mode}${canDelete(i) ? "+delete" : ""}`).join(", ");
+  logger.info(`Registered ${toolMap.size} of ${definitions.length} tools (instances: ${modes})`);
   return toolMap;
 }

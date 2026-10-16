@@ -4,31 +4,21 @@
  */
 
 import { z } from "zod";
-import { ResourceConfig, ToolDefinition } from "../resource-factory.js";
-import { HaloClient } from "../../client/halo-client.js";
+import { ResourceConfig, ToolDefinition, successResult, errorResult } from "../resource-factory.js";
 
-export function createAgentsConfig(client: HaloClient): ResourceConfig {
+export function createAgentsConfig(): ResourceConfig {
   const meToolDef: ToolDefinition = {
     name: "halo_agents_me",
     description: "Get the agent associated with the current access token. Halo permission: Agent.",
     inputSchema: z.object({}),
-    handler: async () => {
+    access: "read",
+    resources: ["Agent"],
+    handler: async (_args, ctx) => {
       try {
-        const response = await client.get("/Agent", "me");
-        if (!response.ok) {
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ error: `Failed: HTTP ${response.status}` }) }],
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(response.data, null, 2) }],
-        };
+        const response = await ctx.client.get("/Agent", "me");
+        return successResult(response.data);
       } catch (err) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: (err as Error).message }) }],
-          isError: true,
-        };
+        return errorResult((err as Error).message);
       }
     },
   };

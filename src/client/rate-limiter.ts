@@ -1,5 +1,5 @@
 /**
- * Halo ITSM MCP Server - Rate Limiter
+ * HaloForge MCP | Rate Limiter
  *
  * Sliding window rate limiter enforcing Halo's 700 requests / 300 seconds limit.
  * Tracks request timestamps and delays requests that would exceed the limit.

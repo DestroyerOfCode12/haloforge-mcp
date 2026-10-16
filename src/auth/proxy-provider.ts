@@ -1,5 +1,5 @@
 /**
- * Halo ITSM MCP Server - Custom OAuth Server Provider
+ * HaloForge MCP | Custom OAuth Server Provider
  *
  * Bridges MCP's OAuth2 Authorization Code flow (required by the protocol)
  * to Halo's OAuth2 Client Credentials flow (what Halo supports).

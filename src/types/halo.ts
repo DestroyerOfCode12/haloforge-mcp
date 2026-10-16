@@ -1,5 +1,5 @@
 /**
- * Halo ITSM MCP Server - Halo API Types
+ * HaloForge MCP | Halo API Types
  */
 
 // Generic paginated response wrapper

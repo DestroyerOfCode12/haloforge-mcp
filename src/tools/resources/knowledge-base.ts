@@ -3,7 +3,6 @@
  * Endpoint: /KBArticle
  */
 
-import { z } from "zod";
 import { ResourceConfig } from "../resource-factory.js";
 
 export const knowledgeBaseConfig: ResourceConfig = {

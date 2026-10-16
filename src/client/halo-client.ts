@@ -1,38 +1,61 @@
 /**
- * Halo ITSM MCP Server - HTTP Client
+ * HaloForge MCP | HTTP Client
  *
- * Wraps all Halo API communication with:
+ * Wraps all Halo API communication for one instance with:
  * - Automatic Bearer token injection
- * - Rate limiting
- * - Retry with exponential backoff
+ * - Rate limiting (700 requests per 5 minutes, per instance)
+ * - Retry with exponential backoff and jitter
  * - Circuit breaker
  * - Timeout handling
+ *
+ * Retries are deliberately conservative for writes: a POST or DELETE is only
+ * retried when Halo says it did not process the request (429), never after a
+ * server error or a dropped connection, so a create can never be sent twice.
  */
 
 import { HaloConfig } from "../types/config.js";
 import { HaloAuth } from "../auth/oauth2.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { logger } from "../utils/logger.js";
+import { maskSecrets } from "../utils/secrets.js";
+import { describeNetworkError } from "../utils/network.js";
+
+export { describeNetworkError };
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const ATTACHMENT_TIMEOUT_MS = 120_000;
-const MAX_RETRIES_RATE_LIMIT = 3;
-const MAX_RETRIES_SERVER_ERROR = 1;
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_RESET_MS = 30_000;
+const RETRYABLE_STATUS = new Set([500, 502, 503, 504]);
 
-interface RequestOptions {
-  method: "GET" | "POST" | "DELETE";
+export type HttpMethod = "GET" | "POST" | "DELETE";
+
+export interface RequestOptions {
+  method: HttpMethod;
   path: string;
   params?: Record<string, unknown>;
   body?: unknown;
   timeout?: number;
+  /** Send the body exactly as given (default wraps objects in an array for upserts) */
+  rawBody?: boolean;
 }
 
-interface ApiResponse<T = unknown> {
+export interface ApiResponse<T = unknown> {
   ok: boolean;
   status: number;
   data: T;
+}
+
+export interface ClientOptions {
+  maxRetries?: number;
+  baseBackoffMs?: number;
+  rateLimiter?: RateLimiter;
+}
+
+export class HaloApiError extends Error {
+  constructor(message: string, public readonly status?: number) {
+    super(maskSecrets(message));
+    this.name = "HaloApiError";
+  }
 }
 
 export class HaloClient {
@@ -41,17 +64,23 @@ export class HaloClient {
   private config: HaloConfig;
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
+  private readonly maxRetries: number;
+  private readonly baseBackoffMs: number;
 
-  constructor(config: HaloConfig) {
+  constructor(config: HaloConfig, options: ClientOptions = {}) {
     this.config = config;
     this.auth = new HaloAuth(config);
-    this.rateLimiter = new RateLimiter();
+    this.rateLimiter = options.rateLimiter ?? new RateLimiter();
+    this.maxRetries = options.maxRetries ?? parseInt(process.env.HALO_MAX_RETRIES || "3", 10);
+    this.baseBackoffMs = options.baseBackoffMs ?? 1000;
+  }
+
+  get instanceName(): string {
+    return this.config.name;
   }
 
   /**
    * Set a pre-existing Bearer token (from OAuth proxy flow).
-   * The client will use this token for all API calls instead of
-   * fetching its own via Client Credentials.
    */
   setToken(token: string): void {
     this.auth.setStaticToken(token);
@@ -65,209 +94,186 @@ export class HaloClient {
     this.auth.setCredentials(clientId, clientSecret);
   }
 
-  /**
-   * GET request to a Halo API collection endpoint.
-   */
   async list<T = unknown>(path: string, params?: Record<string, unknown>): Promise<ApiResponse<T>> {
     return this.request<T>({ method: "GET", path, params });
   }
 
-  /**
-   * GET request for a single resource.
-   */
   async get<T = unknown>(path: string, id: number | string, params?: Record<string, unknown>): Promise<ApiResponse<T>> {
-    return this.request<T>({ method: "GET", path: `${path}/${id}`, params });
+    return this.request<T>({ method: "GET", path: `${path}/${encodeURIComponent(String(id))}`, params });
   }
 
-  /**
-   * POST request to create or update.
-   */
-  async post<T = unknown>(path: string, body: unknown): Promise<ApiResponse<T>> {
-    return this.request<T>({ method: "POST", path, body });
+  /** POST to create or update. Objects are wrapped in an array, as Halo expects. */
+  async post<T = unknown>(path: string, body: unknown, params?: Record<string, unknown>): Promise<ApiResponse<T>> {
+    return this.request<T>({ method: "POST", path, body, params });
   }
 
-  /**
-   * DELETE request.
-   */
   async delete<T = unknown>(path: string, id: number | string, params?: Record<string, unknown>): Promise<ApiResponse<T>> {
-    return this.request<T>({ method: "DELETE", path: `${path}/${id}`, params });
+    return this.request<T>({ method: "DELETE", path: `${path}/${encodeURIComponent(String(id))}`, params });
   }
 
-  /**
-   * Get current rate limit status.
-   */
   getRateLimitStatus() {
     return this.rateLimiter.getStatus();
   }
 
-  /**
-   * Check if authenticated.
-   */
   isAuthenticated(): boolean {
     return this.auth.isAuthenticated();
   }
 
-  /**
-   * Core request method with retry, rate limiting, and circuit breaker.
-   */
-  private async request<T>(options: RequestOptions, retryCount = 0): Promise<ApiResponse<T>> {
-    // Circuit breaker check
-    if (Date.now() < this.circuitOpenUntil) {
-      throw new Error(
-        `Circuit breaker open. Too many consecutive failures. Retry after ${new Date(this.circuitOpenUntil).toISOString()}`
-      );
-    }
-
-    // Rate limit
-    await this.rateLimiter.acquire();
-
-    // Build URL
-    const url = new URL(`${this.config.baseUrl}/api${options.path}`);
-    if (options.params) {
-      for (const [key, value] of Object.entries(options.params)) {
+  buildUrl(path: string, params?: Record<string, unknown>): URL {
+    const url = new URL(`${this.config.baseUrl}/api${path}`);
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
         if (value === undefined || value === null || value === "") continue;
         if (Array.isArray(value)) {
-          // Halo expects CSV for primitive-array filters (team, agent, status, ...)
-          // and JSON for object-array params (advanced_search).
+          // Halo expects CSV for primitive array filters (team, agent, status, ...)
+          // and JSON for object array params (advanced_search).
           const isObjectArray = value.length > 0 && typeof value[0] === "object" && value[0] !== null;
           url.searchParams.set(key, isObjectArray ? JSON.stringify(value) : value.join(","));
+        } else if (typeof value === "object") {
+          url.searchParams.set(key, JSON.stringify(value));
         } else {
           url.searchParams.set(key, String(value));
         }
       }
     }
+    return url;
+  }
 
-    // Get token
-    const token = await this.auth.getToken();
-    const timeout = options.timeout || DEFAULT_TIMEOUT_MS;
-
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-
-    const fetchOptions: RequestInit & { signal?: AbortSignal } = {
-      method: options.method,
-      headers,
-    };
-
-    if (options.body && (options.method === "POST")) {
-      fetchOptions.body = JSON.stringify(Array.isArray(options.body) ? options.body : [options.body]);
+  /**
+   * Core request method with retry, rate limiting, and circuit breaker.
+   */
+  async request<T>(options: RequestOptions, attempt = 0, authRetried = false): Promise<ApiResponse<T>> {
+    if (Date.now() < this.circuitOpenUntil) {
+      throw new HaloApiError(
+        `Circuit breaker open for instance "${this.config.name}" after repeated failures. Retry after ${new Date(this.circuitOpenUntil).toISOString()}`
+      );
     }
 
-    // Timeout via AbortController
+    await this.rateLimiter.acquire();
+
+    const url = this.buildUrl(options.path, options.params);
+    const token = await this.auth.getToken();
+    const timeout = options.timeout || DEFAULT_TIMEOUT_MS;
+    const idempotent = options.method === "GET";
+
+    const fetchOptions: RequestInit = {
+      method: options.method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+    };
+    if (options.body !== undefined && options.method === "POST") {
+      const body = options.rawBody || Array.isArray(options.body) ? options.body : [options.body];
+      fetchOptions.body = JSON.stringify(body);
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
     fetchOptions.signal = controller.signal;
-
     const startTime = Date.now();
 
+    let response: Response;
     try {
       logger.debug(`${options.method} ${url.pathname}`, {
+        instance: this.config.name,
         params: options.params ? Object.keys(options.params).join(",") : undefined,
       });
-
-      const response = await fetch(url.toString(), fetchOptions);
-      clearTimeout(timeoutId);
-
-      const duration = Date.now() - startTime;
-      logger.info(`${options.method} ${url.pathname} -> ${response.status} (${duration}ms)`);
-
-      // Success - reset circuit breaker
-      if (response.ok) {
-        this.consecutiveFailures = 0;
-
-        let data: T;
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
-          data = (await response.json()) as T;
-        } else {
-          data = (await response.text()) as unknown as T;
-        }
-
-        return { ok: true, status: response.status, data };
-      }
-
-      // Handle specific error codes
-      switch (response.status) {
-        case 401: {
-          // Token expired - force refresh and retry once
-          if (retryCount === 0) {
-            logger.warn("Received 401. Refreshing token and retrying.");
-            await this.auth.forceRefresh();
-            return this.request<T>(options, retryCount + 1);
-          }
-          this.recordFailure();
-          throw new Error("Authentication failed after token refresh. Check your Halo credentials.");
-        }
-
-        case 429: {
-          // Rate limited
-          if (retryCount < MAX_RETRIES_RATE_LIMIT) {
-            const retryAfter = response.headers.get("Retry-After");
-            const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : this.backoffMs(retryCount);
-            logger.warn(`Rate limited (429). Retry ${retryCount + 1}/${MAX_RETRIES_RATE_LIMIT} after ${waitMs}ms`);
-            await this.delay(waitMs);
-            return this.request<T>(options, retryCount + 1);
-          }
-          this.recordFailure();
-          throw new Error("Rate limit exceeded after maximum retries.");
-        }
-
-        case 500:
-        case 502:
-        case 503: {
-          if (retryCount < MAX_RETRIES_SERVER_ERROR) {
-            const waitMs = this.backoffMs(retryCount);
-            logger.warn(`Server error (${response.status}). Retrying after ${waitMs}ms`);
-            await this.delay(waitMs);
-            return this.request<T>(options, retryCount + 1);
-          }
-          this.recordFailure();
-          const errorText = await response.text().catch(() => "");
-          if (errorText) {
-            logger.error("Halo server error details", { status: response.status, responseBody: errorText.substring(0, 1000) });
-          }
-          throw new Error(`Halo server error (${response.status}): ${response.statusText}`);
-        }
-
-        default: {
-          const errorText = await response.text().catch(() => "");
-          // Log full details server-side, return sanitized message to client
-          if (errorText) {
-            logger.error("Halo API error details", {
-              status: response.status,
-              path: options.path,
-              responseBody: errorText.substring(0, 1000),
-            });
-          }
-          let errorMessage = `Halo API error (${response.status}): ${response.statusText}`;
-          if (errorText) {
-            try {
-              const errorJson = JSON.parse(errorText);
-              if (errorJson.message) {
-                // Sanitize: only include message field, limit length
-                const safeMsg = String(errorJson.message).substring(0, 200);
-                errorMessage += ` - ${safeMsg}`;
-              }
-            } catch {
-              // Don't forward raw error text to client
-            }
-          }
-          throw new Error(errorMessage);
-        }
-      }
+      response = await fetch(url.toString(), fetchOptions);
     } catch (error) {
       clearTimeout(timeoutId);
-
-      if (error instanceof Error && error.name === "AbortError") {
-        this.recordFailure();
-        throw new Error(`Request timed out after ${timeout}ms: ${options.method} ${options.path}`);
+      const isTimeout = error instanceof Error && error.name === "AbortError";
+      if (idempotent && attempt < this.maxRetries) {
+        const waitMs = this.backoffMs(attempt);
+        logger.warn(`${isTimeout ? "Timeout" : "Network error"} on GET ${url.pathname}. Retry ${attempt + 1}/${this.maxRetries} after ${Math.round(waitMs)}ms`);
+        await this.delay(waitMs);
+        return this.request<T>(options, attempt + 1, authRetried);
       }
-
-      throw error;
+      this.recordFailure();
+      if (isTimeout) {
+        throw new HaloApiError(`Request timed out after ${timeout}ms: ${options.method} ${options.path} on instance "${this.config.name}"`);
+      }
+      throw new HaloApiError(
+        `Could not reach instance "${this.config.name}" (${describeNetworkError(error)}). Check network access and proxy settings.` +
+          (idempotent ? "" : " The write was not retried; check whether it was applied before trying again.")
+      );
     }
+    clearTimeout(timeoutId);
+
+    const duration = Date.now() - startTime;
+    logger.info(`${options.method} ${url.pathname} -> ${response.status} (${duration}ms)`, { instance: this.config.name });
+
+    if (response.ok) {
+      this.consecutiveFailures = 0;
+      let data: T;
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        data = (await response.json()) as T;
+      } else {
+        const text = await response.text();
+        try {
+          data = (text ? JSON.parse(text) : text) as T;
+        } catch {
+          data = text as unknown as T;
+        }
+      }
+      return { ok: true, status: response.status, data };
+    }
+
+    if (response.status === 401 && !authRetried) {
+      logger.warn("Received 401. Refreshing token and retrying.", { instance: this.config.name });
+      await this.auth.forceRefresh();
+      return this.request<T>(options, attempt, true);
+    }
+    if (response.status === 401) {
+      this.recordFailure();
+      throw new HaloApiError(
+        `Halo rejected the token for instance "${this.config.name}" (HTTP 401) even after a refresh. ` +
+          "Check the API application's permissions and that it is still active.",
+        401
+      );
+    }
+
+    if (response.status === 429 && attempt < this.maxRetries) {
+      const retryAfter = parseInt(response.headers.get("Retry-After") || "", 10);
+      const waitMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : this.backoffMs(attempt);
+      logger.warn(`Rate limited (429). Retry ${attempt + 1}/${this.maxRetries} after ${Math.round(waitMs)}ms`);
+      await this.delay(waitMs);
+      return this.request<T>(options, attempt + 1, authRetried);
+    }
+
+    if (RETRYABLE_STATUS.has(response.status) && idempotent && attempt < this.maxRetries) {
+      const waitMs = this.backoffMs(attempt);
+      logger.warn(`Server error (${response.status}). Retry ${attempt + 1}/${this.maxRetries} after ${Math.round(waitMs)}ms`);
+      await this.delay(waitMs);
+      return this.request<T>(options, attempt + 1, authRetried);
+    }
+
+    if (response.status === 429 || RETRYABLE_STATUS.has(response.status)) this.recordFailure();
+
+    const errorText = await response.text().catch(() => "");
+    if (errorText) {
+      logger.error("Halo API error details", {
+        instance: this.config.name,
+        status: response.status,
+        path: options.path,
+        responseBody: errorText.substring(0, 1000),
+      });
+    }
+    let errorMessage = `Halo API error (${response.status}) on ${options.method} ${options.path} for instance "${this.config.name}"`;
+    if (response.status === 403) errorMessage += ". The API application lacks permission for this resource";
+    if (response.status === 404) errorMessage += ". Not found";
+    if (errorText) {
+      try {
+        const errorJson = JSON.parse(errorText);
+        const msg = errorJson.message ?? errorJson.error ?? errorJson.title;
+        if (msg) errorMessage += ` | ${String(msg).substring(0, 300)}`;
+      } catch {
+        if (errorText.length < 300 && !/<html/i.test(errorText)) errorMessage += ` | ${errorText}`;
+      }
+    }
+    throw new HaloApiError(errorMessage, response.status);
   }
 
   private recordFailure(): void {
@@ -275,15 +281,14 @@ export class HaloClient {
     if (this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
       this.circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_RESET_MS;
       logger.error(
-        `Circuit breaker OPEN after ${this.consecutiveFailures} consecutive failures. Reset at ${new Date(this.circuitOpenUntil).toISOString()}`
+        `Circuit breaker OPEN for instance "${this.config.name}" after ${this.consecutiveFailures} consecutive failures. Reset at ${new Date(this.circuitOpenUntil).toISOString()}`
       );
     }
   }
 
-  private backoffMs(retryCount: number): number {
-    const base = 1000 * Math.pow(2, retryCount);
-    const jitter = Math.random() * 1000;
-    return base + jitter;
+  private backoffMs(attempt: number): number {
+    const base = this.baseBackoffMs * Math.pow(2, attempt);
+    return base + Math.random() * this.baseBackoffMs;
   }
 
   private delay(ms: number): Promise<void> {

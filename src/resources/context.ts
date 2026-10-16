@@ -1,11 +1,13 @@
 /**
- * Halo ITSM MCP Server - MCP Resources (Read-Only Context)
+ * HaloForge MCP | MCP Resources (read only context)
  *
- * Provides contextual information to MCP clients without performing actions.
+ * Provides contextual information about the default instance to MCP clients
+ * without performing actions.
  */
 
-import { HaloClient } from "../client/halo-client.js";
-import { HaloConfig } from "../types/config.js";
+import { InstanceManager } from "../client/instance-manager.js";
+import { canDelete, canWrite } from "../safety/policy.js";
+import { maskSecrets } from "../utils/secrets.js";
 
 export interface McpResource {
   uri: string;
@@ -15,19 +17,26 @@ export interface McpResource {
   handler: () => Promise<string>;
 }
 
-export function buildResources(client: HaloClient, config: HaloConfig): McpResource[] {
+export function buildResources(manager: InstanceManager): McpResource[] {
+  const { client } = manager.resolve();
   return [
     {
       uri: "halo://config/status",
       name: "Server Status",
-      description: "Connection status, authenticated state, and instance URL",
+      description: "Configured instances, safety modes and authentication state",
       mimeType: "application/json",
       handler: async () => {
         return JSON.stringify({
-          instance: config.baseUrl,
-          authenticated: client.isAuthenticated(),
-          api_version: "2.220.93",
-          scope: config.scope,
+          default_instance: manager.defaultName,
+          instances: manager.allConfigs().map((c) => ({
+            name: c.name,
+            base_url: c.baseUrl,
+            mode: c.mode,
+            can_write: canWrite(c),
+            can_delete: canDelete(c),
+            authenticated: manager.resolve(c.name).client.isAuthenticated(),
+            scope: c.scope,
+          })),
         }, null, 2);
       },
     },
@@ -50,7 +59,7 @@ export function buildResources(client: HaloClient, config: HaloConfig): McpResou
           const response = await client.list("/Status");
           return JSON.stringify(response.data, null, 2);
         } catch (err) {
-          return JSON.stringify({ error: (err as Error).message });
+          return JSON.stringify({ error: maskSecrets((err as Error).message) });
         }
       },
     },
@@ -64,7 +73,7 @@ export function buildResources(client: HaloClient, config: HaloConfig): McpResou
           const response = await client.list("/Team");
           return JSON.stringify(response.data, null, 2);
         } catch (err) {
-          return JSON.stringify({ error: (err as Error).message });
+          return JSON.stringify({ error: maskSecrets((err as Error).message) });
         }
       },
     },
@@ -78,7 +87,7 @@ export function buildResources(client: HaloClient, config: HaloConfig): McpResou
           const response = await client.list("/Agent");
           return JSON.stringify(response.data, null, 2);
         } catch (err) {
-          return JSON.stringify({ error: (err as Error).message });
+          return JSON.stringify({ error: maskSecrets((err as Error).message) });
         }
       },
     },
@@ -92,7 +101,7 @@ export function buildResources(client: HaloClient, config: HaloConfig): McpResou
           const response = await client.list("/TicketType");
           return JSON.stringify(response.data, null, 2);
         } catch (err) {
-          return JSON.stringify({ error: (err as Error).message });
+          return JSON.stringify({ error: maskSecrets((err as Error).message) });
         }
       },
     },

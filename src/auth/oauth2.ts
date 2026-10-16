@@ -1,5 +1,5 @@
 /**
- * Halo ITSM MCP Server - OAuth2 Client Credentials Authentication
+ * HaloForge MCP | OAuth2 Client Credentials Authentication
  *
  * Handles token acquisition, caching, and automatic refresh.
  * Tokens are cached in memory and refreshed 60 seconds before expiry.
@@ -8,6 +8,8 @@
 import { z } from "zod";
 import { HaloConfig, CachedToken } from "../types/config.js";
 import { logger } from "../utils/logger.js";
+import { registerSecret } from "../utils/secrets.js";
+import { describeNetworkError } from "../utils/network.js";
 
 // Validate the shape of Halo's token response to catch malformed data early
 const TokenResponseSchema = z.object({
@@ -33,6 +35,7 @@ export class HaloAuth {
    * uses this token directly instead of fetching via Client Credentials.
    */
   setStaticToken(token: string): void {
+    registerSecret(token);
     this.staticToken = token;
   }
 
@@ -42,6 +45,7 @@ export class HaloAuth {
    * when the initial token expires, instead of returning a stale static token.
    */
   setCredentials(clientId: string, clientSecret: string): void {
+    registerSecret(clientSecret);
     this.config = { ...this.config, clientId, clientSecret };
     logger.debug("Credentials set for token auto-refresh");
   }
@@ -103,7 +107,9 @@ export class HaloAuth {
    * Fetch a new token from the Halo auth endpoint.
    */
   private async fetchToken(): Promise<string> {
-    const tokenUrl = `${this.config.baseUrl}/auth/token`;
+    const tokenUrl = this.config.tenant
+      ? `${this.config.baseUrl}/auth/token?tenant=${encodeURIComponent(this.config.tenant)}`
+      : `${this.config.baseUrl}/auth/token`;
     const params = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: this.config.clientId,
@@ -127,19 +133,26 @@ export class HaloAuth {
     } catch (err) {
       clearTimeout(timeout);
       if (err instanceof Error && err.name === "AbortError") {
-        throw new Error("Token request timed out. The Halo server may be unresponsive.");
+        throw new Error(`Token request to instance "${this.config.name}" timed out. The Halo server may be unresponsive.`);
       }
-      throw err;
+      throw new Error(
+        `Could not reach instance "${this.config.name}" for a token (${describeNetworkError(err)}). ` +
+          "Check the base URL, network access and proxy settings (HTTPS_PROXY)."
+      );
     }
     clearTimeout(timeout);
 
     if (!response.ok) {
-      const errorBody = await response.text();
-      logger.error("Token request failed", {
-        status: response.status,
-        statusText: response.statusText,
-      });
-      throw new Error(`Authentication failed (${response.status}): ${response.statusText}`);
+      const errorBody = await response.text().catch(() => "");
+      let haloError = "";
+      try {
+        const parsed = JSON.parse(errorBody) as { error?: string; error_description?: string };
+        haloError = [parsed.error, parsed.error_description].filter(Boolean).join(": ").substring(0, 200);
+      } catch {
+        // not JSON
+      }
+      logger.error("Token request failed", { instance: this.config.name, status: response.status, haloError });
+      throw new Error(authErrorMessage(this.config.name, response.status, haloError));
     }
 
     const raw = await response.json();
@@ -150,6 +163,7 @@ export class HaloAuth {
     }
     const data = parsed.data;
 
+    registerSecret(data.access_token);
     this.cachedToken = {
       accessToken: data.access_token,
       expiresAt: Date.now() + data.expires_in * 1000,
@@ -169,4 +183,25 @@ export class HaloAuth {
   isAuthenticated(): boolean {
     return this.cachedToken !== null && Date.now() < this.cachedToken.expiresAt;
   }
+}
+
+/** A clear, actionable message for a failed token request. Never includes secrets. */
+export function authErrorMessage(instance: string, status: number, haloError = ""): string {
+  const prefix = `HALO_${instance.toUpperCase()}_`;
+  const detail = haloError ? ` Halo said: ${haloError}.` : "";
+  if (status === 400 || status === 401) {
+    return (
+      `Authentication failed for instance "${instance}" (HTTP ${status}).${detail} ` +
+      `Check ${prefix}CLIENT_ID and ${prefix}CLIENT_SECRET (or HALO_CLIENT_ID and HALO_CLIENT_SECRET), ` +
+      "that the API application is active, uses Client ID and Secret (Services) and has the 'all' scope. " +
+      "A newly created API application can return 401 for a minute or two."
+    );
+  }
+  if (status === 403) {
+    return `Authentication refused for instance "${instance}" (HTTP 403).${detail} The API application may lack permissions.`;
+  }
+  if (status === 404) {
+    return `Token endpoint not found for instance "${instance}" (HTTP 404). Check the base URL; it should be the root, for example https://yourcompany.haloitsm.com.`;
+  }
+  return `Authentication failed for instance "${instance}" (HTTP ${status}).${detail}`;
 }
