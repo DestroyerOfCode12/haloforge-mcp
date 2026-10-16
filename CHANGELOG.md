@@ -2,6 +2,16 @@
 
 ## 2.0.0 (in progress)
 
+### Phase 4: moving configuration between instances
+
+* `halo_config_export`: chosen areas, resources or all configuration to JSON, one file per object plus a manifest, sensitive values masked, written only inside `HALO_EXPORT_DIR` (default `./exports`, git ignored).
+* `halo_config_compare`: instance against instance or export against instance, matched by name, ignoring IDs, GUIDs, dates and sensitive values; lists missing, only in target and changed field paths.
+* `halo_config_copy`: copies objects with references mapped by name (report groups, teams, agents, statuses, fields, field groups, ticket types, SLAs, priorities, workflows, reports in dashboard widgets). Pulls in dependencies, creates in dependency order and chains new IDs. Dry run by default with a full plan; applying is refused on read mode targets and while references are unresolved. Never copies sensitive values.
+* `halo_config_document`: markdown configuration summary for handover documents, returned or written to a file.
+* Catalogue marks record like resources so area exports skip them unless `include_data` is set.
+* Diffs now match array items on `fieldid`, `field_id`, `guid` or `name` when no `id` fits.
+* Not yet verified against a live instance; dashboard widget IDs and layout keys on copy follow the same assumptions as `halo_dashboard_build`.
+
 ### Phase 3: full configuration coverage
 
 * List, get, upsert (dry run, safe merge) and delete tools for the 66 catalogue configuration resources the original did not cover; read only resources (TicketTypeField, WorkflowStep) get list and get only. Merge keys for FieldGroup, Tabs, Outcome, FieldInfo, ApprovalProcess, DashboardLinks and AssetTypeInfo nested arrays.

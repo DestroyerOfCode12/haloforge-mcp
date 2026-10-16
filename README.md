@@ -4,7 +4,7 @@ An MCP server for HaloITSM that can read, and safely configure, what an administ
 
 Based on [halo-itsm-mcp](https://github.com/omichelbraga/halo-itsm-mcp) by omichelbraga (MIT licence). HaloForge keeps the original's tools, transports and OAuth proxy, and adds safety modes, dry runs, safe merges, an audit log, support for several instances and output control.
 
-> Status: version 2 is under active development. Core improvements and configuration coverage are in place; export, compare and copy between instances are coming. The higher level tools are tested against a mocked API and still need checking against a live instance. See [CHANGELOG.md](CHANGELOG.md).
+> Status: version 2 is under active development. Core improvements, configuration coverage and moving configuration between instances are in place; integration tests and full tool documentation are coming. The higher level tools are tested against a mocked API and still need checking against a live instance. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
@@ -86,6 +86,7 @@ Keep secrets in environment variables or a git ignored `.env` file (see [.env.ex
 | `HTTPS_PROXY`, `NO_PROXY` | not set | Outbound proxy; used automatically when set |
 | `HALO_DISABLE_PROXY` | not set | `true` ignores proxy variables |
 | `HALO_TOOLS` | not set | Register only tools matching these comma separated names (`*` wildcards), for example `halo_ticket_type_layout_*,halo_report*,halo_dashboard*` |
+| `HALO_EXPORT_DIR` | `exports` | Folder for exports and documents; tools cannot write outside it |
 | `HALO_TOOLS_EXCLUDE` | not set | Leave out tools matching these names, for example `halo_tickets_*,halo_invoices_*` |
 | `HALO_SCOPE`, `HALO_TENANT` | `all`, not set | Token scope and tenant (also per instance) |
 | `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
@@ -192,6 +193,25 @@ That is over 400 tools in full mode. If your client struggles with that many, na
 | `halo_dashboard_build` | Create or update a dashboard from a grid: writes the 12 column `lg` layout, keeps other breakpoints, checks overlaps, grants all agents view access |
 | `halo_schema_get` | A resource's methods and model fields from the instance's API spec |
 | `halo_config_probe` | The shape of a resource's list and detail responses (keys, types, counts; never values) |
+
+### Moving configuration between instances
+
+| Tool | Purpose |
+|---|---|
+| `halo_config_export` | Export chosen areas or resources (or all configuration) to JSON, one file per object, with a manifest. Sensitive values are masked |
+| `halo_config_compare` | Compare two instances, or an export against an instance, matched by name: missing, only in target, and changed field paths. IDs and dates are ignored |
+| `halo_config_copy` | Copy chosen objects to another instance with references mapped by name. Dry run by default with a full ordered plan |
+| `halo_config_document` | A markdown summary of an instance's configuration for handover documents |
+
+Files are written under the export folder: `HALO_EXPORT_DIR`, default `./exports` (git ignored). Paths outside it are refused. Selecting by area skips record like resources (agents, users, clients, sites, articles, items, suppliers, contracts, licences, downtime) unless `include_data: true`.
+
+`halo_config_copy` maps references by name: report groups (lookup 41), teams, agents, statuses, fields, field groups, ticket types, SLAs, priorities, workflows and reports, including the report IDs in dashboard widgets. Copying a report group brings its reports, and copying a dashboard brings the reports its widgets use and their groups (turn off with `include_dependencies: false` and `include_group_reports: false`). Objects are created in dependency order and new IDs are fed into later steps. Objects that already exist on the target by name are skipped, or updated with `on_existing: "update"`. Applying (`dry_run: false`) needs the target in write mode and is refused while any reference cannot be mapped, unless `allow_unresolved: true`. Sensitive values (passwords, secrets, tokens) are never copied.
+
+```text
+halo_config_copy { "source_instance": "trial", "target_instance": "prod",
+                   "items": [{ "resource": "ReportGroup", "name": "MCP TEST | Service desk" },
+                             { "resource": "DashboardLinks", "name": "MCP TEST | Service desk" }] }
+```
 
 Some examples:
 
