@@ -94,7 +94,14 @@ const paginationSchema = {
   ...outputSchema,
 };
 
-const CONTROL_KEYS = new Set(["fields", "all_pages", "max_items", "instance", "dry_run", "merge", "replace_arrays", "full_object", "show_payload"]);
+const CONTROL_KEYS = new Set(["fields", "all_pages", "max_items", "instance", "dry_run", "merge", "replace_arrays", "full_object", "show_payload", "extra_params"]);
+
+export const extraParamsSchema = {
+  extra_params: z
+    .record(z.union([z.string(), z.number(), z.boolean()]))
+    .optional()
+    .describe("Any other Halo query parameters to send as given, for example { \"client_id\": 12 }"),
+};
 
 export function successResult(data: unknown): ToolResult {
   return { content: [{ type: "text", text: maskSecrets(renderObject(data)) }] };
@@ -113,6 +120,12 @@ function queryParams(args: Record<string, unknown>, exclude: string[] = []): Rec
   for (const [key, value] of Object.entries(args)) {
     if (CONTROL_KEYS.has(key) || exclude.includes(key)) continue;
     if (value !== undefined && value !== null) params[key] = value;
+  }
+  const extra = args.extra_params as Record<string, unknown> | undefined;
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (value !== undefined && value !== null && params[key] === undefined) params[key] = value;
+    }
   }
   return params;
 }
@@ -418,7 +431,7 @@ export function createResourceTools(config: ResourceConfig): ToolDefinition[] {
       description:
         `List or search ${config.description} records. Supports paging (or all_pages), sorting, filtering and choosing fields. ` +
         `Halo permission: ${config.readPermission}.`,
-      inputSchema: z.object({ ...paginationSchema, ...(config.listParams || {}) }),
+      inputSchema: z.object({ ...paginationSchema, ...extraParamsSchema, ...(config.listParams || {}) }),
       access: "read",
       resources,
       handler: async (args, ctx) => {
@@ -452,6 +465,7 @@ export function createResourceTools(config: ResourceConfig): ToolDefinition[] {
         id: z.union([z.number().int(), z.string().max(100)]).describe(`The ${config.description} ID`),
         includedetails: z.boolean().optional().describe("Include related sub objects in the response"),
         ...outputSchema,
+        ...extraParamsSchema,
         ...(config.getParams || {}),
       }),
       access: "read",

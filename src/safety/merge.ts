@@ -74,7 +74,10 @@ export function mergeArray(
       result.push(raw);
       continue;
     }
-    const key = matchKeyFor(raw, candidates);
+    // Prefer a key that both the change and the current items carry
+    const key =
+      candidates.find((k) => present(raw[k]) && result.some((c) => isPlainObject(c) && present(c[k]))) ??
+      matchKeyFor(raw, candidates);
     const index = key === undefined ? -1 : result.findIndex((c) => isPlainObject(c) && sameKey(c[key], raw[key]));
     if (raw[REMOVE_FLAG] === true) {
       if (index >= 0) result.splice(index, 1);

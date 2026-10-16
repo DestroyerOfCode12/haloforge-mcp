@@ -11,6 +11,11 @@ import { z, ZodRawShape } from "zod";
 import { InstanceManager } from "../client/instance-manager.js";
 import { createResourceTools, ToolDefinition, ToolResult, errorResult, successResult } from "./resource-factory.js";
 import { createApiRequestTool } from "./api-request.js";
+import { catalogueConfigs } from "./resources/config-catalogue.js";
+import { createLayoutTools } from "./config/layouts.js";
+import { createReportTools } from "./config/reports.js";
+import { createDashboardTools } from "./config/dashboards.js";
+import { createDiagnosticTools } from "./config/diagnostics.js";
 import { AuditLog } from "../safety/audit.js";
 import { ToolAccess, canDelete, canWrite, checkAccess, shouldRegister } from "../safety/policy.js";
 
@@ -147,9 +152,19 @@ export function allToolDefinitions(): ToolDefinition[] {
     downtimeConfig,
   ];
 
+  // Configuration resources from the catalogue not covered above
+  allConfigs.push(...catalogueConfigs(new Set(allConfigs.map((c) => c.apiPath.toLowerCase()))));
+
   const tools: ToolDefinition[] = [];
   for (const config of allConfigs) tools.push(...createResourceTools(config));
-  tools.push(createApiRequestTool(), createInstancesTool());
+  tools.push(
+    createApiRequestTool(),
+    createInstancesTool(),
+    ...createLayoutTools(),
+    ...createReportTools(),
+    ...createDashboardTools(),
+    ...createDiagnosticTools()
+  );
   return tools;
 }
 
@@ -188,15 +203,41 @@ export function wrapTool(tool: ToolDefinition, manager: InstanceManager, audit: 
   };
 }
 
+function toPatterns(raw: string | undefined): RegExp[] | undefined {
+  if (!raw || raw.trim() === "") return undefined;
+  return raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "i"));
+}
+
+/**
+ * Optional tool filters: HALO_TOOLS keeps only matching tools, HALO_TOOLS_EXCLUDE
+ * drops matching tools. Comma separated names with * wildcards, for example
+ * HALO_TOOLS=halo_ticket_type_layout_*,halo_report*,halo_dashboard*.
+ */
+export function toolFilter(env: NodeJS.ProcessEnv = process.env): (name: string) => boolean {
+  const include = toPatterns(env.HALO_TOOLS);
+  const exclude = toPatterns(env.HALO_TOOLS_EXCLUDE);
+  return (name) => (!include || include.some((r) => r.test(name))) && !(exclude && exclude.some((r) => r.test(name)));
+}
+
 /**
  * Build the tools to register for the configured instances.
  */
-export function buildAllTools(manager: InstanceManager, audit: AuditLog = new AuditLog()): Map<string, RegisteredTool> {
+export function buildAllTools(
+  manager: InstanceManager,
+  audit: AuditLog = new AuditLog(),
+  env: NodeJS.ProcessEnv = process.env
+): Map<string, RegisteredTool> {
   const instances = manager.allConfigs();
+  const allowed = toolFilter(env);
   const toolMap = new Map<string, RegisteredTool>();
   const definitions = allToolDefinitions();
   for (const tool of definitions) {
     if (!shouldRegister(tool.access, instances)) continue;
+    if (!allowed(tool.name) && tool.name !== "halo_instances_list") continue;
     if (toolMap.has(tool.name)) logger.warn(`Duplicate tool name: ${tool.name}. Overwriting.`);
     toolMap.set(tool.name, wrapTool(tool, manager, audit));
   }
