@@ -24,6 +24,20 @@ import {
   ConfigResource,
 } from "../src/catalogue/config-resources.js";
 import { configureProxy } from "../src/utils/proxy.js";
+import { allToolDefinitions } from "../src/tools/registry.js";
+
+/** Tool prefix per API resource, from the tool definitions. */
+function toolPrefixes(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const def of allToolDefinitions()) {
+    const m = def.name.match(/^(halo_.+)_(list|get)$/);
+    if (!m) continue;
+    for (const r of def.resources ?? []) {
+      if (/^[A-Z]/.test(r) && !map.has(r.toLowerCase())) map.set(r.toLowerCase(), `${m[1]}_*`);
+    }
+  }
+  return map;
+}
 
 interface Methods {
   list: boolean;
@@ -159,6 +173,7 @@ function yesNo(value: boolean | undefined): string {
 }
 
 function render(results: Map<string, LiveResult>, specSummary?: string): string {
+  const prefixes = toolPrefixes();
   const lines: string[] = [];
   const total = CONFIG_RESOURCES.length;
   const inOriginal = CONFIG_RESOURCES.filter((r) => ORIGINAL_REPO_RESOURCES.has(r.resource)).length;
@@ -176,6 +191,12 @@ function render(results: Map<string, LiveResult>, specSummary?: string): string 
   lines.push("Known findings from the first assessment (version 2.250.x trial): 83 resources writable, 13 read only.");
   lines.push("Field names only are recorded here; no record values.");
   lines.push("");
+  lines.push("Every resource below has list and get tools; writable resources also have upsert (with dry run) and, when enabled, delete.");
+  lines.push("Higher level tools: `halo_ticket_type_layout_get` / `_set`, `halo_field_group_get` / `_set`, `halo_reports_run`,");
+  lines.push("`halo_reports_clone`, `halo_report_groups_list` / `_create`, `halo_dashboard_build`, plus `halo_schema_get` and");
+  lines.push("`halo_config_probe` for diagnosis. Areas marked \"needs a closer look\" can be checked with `halo_config_probe`");
+  lines.push("(shape only, no values) and listed with extra query parameters through `extra_params`.");
+  lines.push("");
 
   for (const area of CONFIG_AREAS) {
     lines.push(`## ${area}`);
@@ -187,7 +208,8 @@ function render(results: Map<string, LiveResult>, specSummary?: string): string 
       const m = live?.methods;
       const write = res.readOnly ? "No (read only)" : yesNo(m?.post);
       const nested = live?.nested ? Object.keys(live.nested).join(", ") || "none" : "pending";
-      const notes = [res.notes, live?.error].filter(Boolean).join("; ");
+      const tool = prefixes.get(res.resource.toLowerCase());
+      const notes = [tool ? `Tools: \`${tool}\`` : undefined, res.notes, live?.error].filter(Boolean).join("; ");
       lines.push(
         `| ${res.resource} | ${res.uiPath} | \`/api/${res.resource}\` | ${yesNo(m?.list)} | ${yesNo(m?.get)} | ${write} | ${yesNo(m?.delete)} | ${live?.records ?? "pending"} | ${nested} | ${ORIGINAL_REPO_RESOURCES.has(res.resource) ? "Yes" : "No"} | ${notes} |`
       );

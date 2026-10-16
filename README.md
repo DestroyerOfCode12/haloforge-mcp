@@ -4,7 +4,7 @@ An MCP server for HaloITSM that can read, and safely configure, what an administ
 
 Based on [halo-itsm-mcp](https://github.com/omichelbraga/halo-itsm-mcp) by omichelbraga (MIT licence). HaloForge keeps the original's tools, transports and OAuth proxy, and adds safety modes, dry runs, safe merges, an audit log, support for several instances and output control.
 
-> Status: version 2 is under active development. Phase 2 (core improvements) is in place; full configuration coverage, export, compare and copy are coming. See [CHANGELOG.md](CHANGELOG.md).
+> Status: version 2 is under active development. Core improvements and configuration coverage are in place; export, compare and copy between instances are coming. The higher level tools are tested against a mocked API and still need checking against a live instance. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
@@ -85,6 +85,8 @@ Keep secrets in environment variables or a git ignored `.env` file (see [.env.ex
 | `HALO_MAX_RETRIES` | `3` | Retries for reads (and for writes only on HTTP 429) |
 | `HTTPS_PROXY`, `NO_PROXY` | not set | Outbound proxy; used automatically when set |
 | `HALO_DISABLE_PROXY` | not set | `true` ignores proxy variables |
+| `HALO_TOOLS` | not set | Register only tools matching these comma separated names (`*` wildcards), for example `halo_ticket_type_layout_*,halo_report*,halo_dashboard*` |
+| `HALO_TOOLS_EXCLUDE` | not set | Leave out tools matching these names, for example `halo_tickets_*,halo_invoices_*` |
 | `HALO_SCOPE`, `HALO_TENANT` | `all`, not set | Token scope and tenant (also per instance) |
 | `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `MCP_AUTH` | `env` | `env` or `oauth` (HTTP only) |
@@ -172,7 +174,26 @@ The compose file mounts `./logs` for the audit log. TLS is expected to be handle
 
 ## Using the tools
 
-Every resource has `halo_<resource>_list` and `halo_<resource>_get`, plus `_upsert` and `_delete` when the mode allows. Some examples:
+Every resource has `halo_<resource>_list` and `halo_<resource>_get`, plus `_upsert` and `_delete` when the mode allows. The original resources keep their names (for example `halo_tickettypes_*`); the 66 configuration resources added by HaloForge use the API name in lower case (for example `halo_fieldgroup_*`, `halo_outcome_*`, `halo_dashboardlinks_*`). List and get tools accept `extra_params` for any other Halo query parameter. [docs/coverage-matrix.md](docs/coverage-matrix.md) maps each area to its tools.
+
+That is over 400 tools in full mode. If your client struggles with that many, narrow them with `HALO_TOOLS` or `HALO_TOOLS_EXCLUDE`.
+
+### Higher level tools
+
+| Tool | Purpose |
+|---|---|
+| `halo_ticket_type_layout_get` | A ticket type's layout as field groups in order, each field named with its sequence, agent and end user visibility flags, restrictions and display settings, plus the user panel |
+| `halo_ticket_type_layout_set` | Add, move, change, reorder or take out layout fields by ID or name; everything else is kept; dry run diff |
+| `halo_field_group_get` | A field group's fields with visibility conditions and the ticket types that use it |
+| `halo_field_group_set` | Change group settings and fields, including visibility conditions; dry run diff |
+| `halo_reports_run` | Run a report: row count, columns, sample rows and counts per value for a column |
+| `halo_reports_clone` | Copy a report with a new name, SQL, group (by ID or name) or chart settings; rejects SQL with `--` comments |
+| `halo_report_groups_list` / `_create` | Report groups (lookup 41); create skips names that already exist |
+| `halo_dashboard_build` | Create or update a dashboard from a grid: writes the 12 column `lg` layout, keeps other breakpoints, checks overlaps, grants all agents view access |
+| `halo_schema_get` | A resource's methods and model fields from the instance's API spec |
+| `halo_config_probe` | The shape of a resource's list and detail responses (keys, types, counts; never values) |
+
+Some examples:
 
 ```text
 halo_tickettypes_list   { "fields": ["id", "name"], "all_pages": true }
@@ -181,6 +202,8 @@ halo_tickettypes_upsert { "data": { "id": 12, "fields": [{ "fieldid": 205, "seq"
 halo_reports_upsert     { "instance": "trial", "data": [{ "name": "MCP TEST | Open by team" }, { "name": "MCP TEST | Closed by team" }] }
 halo_api_request        { "method": "GET", "path": "/Lookup", "query": { "lookupid": 41 } }
 halo_instances_list     {}
+halo_ticket_type_layout_set { "ticket_type_id": 12, "changes": [{ "field_name": "MCP TEST | Reason", "group_name": "Details", "seq": 4 }], "dry_run": true }
+halo_dashboard_build    { "name": "MCP TEST | Team board", "widgets": [{ "type": "report_chart", "report_id": 30, "x": 0, "y": 0, "w": 8, "h": 4 }, { "type": "ticket_counter", "x": 8, "y": 0, "w": 4, "h": 2 }], "dry_run": true }
 ```
 
 ### Nested array merge

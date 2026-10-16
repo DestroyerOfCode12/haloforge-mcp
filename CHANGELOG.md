@@ -2,6 +2,17 @@
 
 ## 2.0.0 (in progress)
 
+### Phase 3: full configuration coverage
+
+* List, get, upsert (dry run, safe merge) and delete tools for the 66 catalogue configuration resources the original did not cover; read only resources (TicketTypeField, WorkflowStep) get list and get only. Merge keys for FieldGroup, Tabs, Outcome, FieldInfo, ApprovalProcess, DashboardLinks and AssetTypeInfo nested arrays.
+* `extra_params` on every list and get tool for any other Halo query parameter.
+* Higher level tools: `halo_ticket_type_layout_get` / `_set`, `halo_field_group_get` / `_set`, `halo_reports_run`, `halo_reports_clone`, `halo_report_groups_list` / `_create`, `halo_dashboard_build`.
+* Diagnostics: `halo_schema_get` (API spec lookup) and `halo_config_probe` (response shape without values) for the areas that needed a closer look.
+* `HALO_TOOLS` and `HALO_TOOLS_EXCLUDE` to limit the registered tools.
+* The merge helper now prefers a match key that both the change and the current items carry.
+* Coverage matrix lists the tools for each resource.
+* Not yet verified against a live instance: payload shapes for layouts, report groups and dashboard widgets, and the UI paths marked "(to confirm)".
+
 ### Phase 2: core improvements
 
 * Renamed to HaloForge MCP (`haloforge-mcp` package, server and bin). Based on halo-itsm-mcp (MIT).
