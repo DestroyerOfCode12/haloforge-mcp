@@ -4,7 +4,9 @@ An MCP server for HaloITSM that can read, and safely configure, what an administ
 
 Based on [halo-itsm-mcp](https://github.com/omichelbraga/halo-itsm-mcp) by omichelbraga (MIT licence). HaloForge keeps the original's tools, transports and OAuth proxy, and adds safety modes, dry runs, safe merges, an audit log, support for several instances and output control.
 
-> Status: version 2 is under active development. Core improvements, configuration coverage and moving configuration between instances are in place; integration tests and full tool documentation are coming. The higher level tools are tested against a mocked API and still need checking against a live instance. See [CHANGELOG.md](CHANGELOG.md).
+> Status: version 2.0.0. Every feature below is covered by unit tests against a mocked API, and the integration suite passes against a local fake. It has **not yet been run against a live Halo instance**, so the shapes of a few payloads (layout flags, report groups, dashboard widgets) may need adjusting on first contact. See [CHANGELOG.md](CHANGELOG.md).
+
+Documentation: [tool reference](docs/tools.md), [coverage matrix](docs/coverage-matrix.md), [test objects](docs/test-objects.md).
 
 ## Features
 
@@ -243,10 +245,30 @@ Halo ships its own MCP endpoint at `{base}/api/mcp`. It covers service desk work
 ## Development
 
 ```bash
-npm run build      # compile TypeScript
-npm run lint       # ESLint
-npm test           # unit tests (vitest, fetch is mocked)
-npm run coverage-matrix   # regenerate docs/coverage-matrix.md (add -- --live to query an instance, read only)
+npm run build              # compile TypeScript
+npm run lint               # ESLint
+npm test                   # unit tests (vitest, fetch is mocked); integration tests are skipped
+npm run tools-doc          # regenerate docs/tools.md from the tool definitions
+npm run coverage-matrix    # regenerate docs/coverage-matrix.md (add -- --live to query an instance, read only)
+```
+
+### Integration tests
+
+The integration suite runs against a trial instance only when `RUN_INTEGRATION=1` is set:
+
+```bash
+RUN_INTEGRATION=1 npm run test:integration
+```
+
+It needs `HALO_TRIAL_BASE_URL`, `HALO_TRIAL_CLIENT_ID`, `HALO_TRIAL_CLIENT_SECRET` and `HALO_TRIAL_MODE=write`. It reads every matrix area, creates and updates one `MCP TEST |` object per safe writable area and reads it back, does a ticket type layout round trip, and builds, exports, compares and copies (dry run) a report group, report and dashboard. It never deletes anything, refuses instances named like production, only updates records whose name starts with `MCP TEST |`, reuses objects on later runs, and lists them in [docs/test-objects.md](docs/test-objects.md).
+
+To check the suite itself without an instance, run it against the local fake:
+
+```bash
+npm run fake-halo -- 8787 &
+RUN_INTEGRATION=1 HALO_TRIAL_BASE_URL=http://127.0.0.1:8787 HALO_TRIAL_CLIENT_ID=x \
+  HALO_TRIAL_CLIENT_SECRET=fake-secret HALO_TRIAL_MODE=write HALO_AUDIT_LOG=off npm run test:integration
+git checkout docs/test-objects.md   # the fake run rewrites it with fake IDs
 ```
 
 Rules for contributions: never delete anything on an instance during development (rename or deactivate instead), prefix test objects with `MCP TEST |`, use only a trial instance, and keep company names, client names, instance URLs, record data and secrets out of code, docs, tests and commit messages.

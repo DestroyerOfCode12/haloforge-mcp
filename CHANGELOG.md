@@ -1,6 +1,14 @@
 # Changelog
 
-## 2.0.0 (in progress)
+## 2.0.0
+
+### Phase 5: integration tests and documentation
+
+* Integration suite behind `RUN_INTEGRATION=1`: reads every matrix area; creates and updates one `MCP TEST |` object per safe writable area and reads it back; ticket type layout round trip; report group, report and dashboard built, exported, compared and copied in dry run. Never deletes, refuses production like names, only updates test objects, reuses objects on reruns and writes `docs/test-objects.md`.
+* Local fake Halo server (`npm run fake-halo`) to check the suite without an instance. The suite passes against it, including a rerun that reuses every object.
+* `docs/tools.md` generated from the tool definitions (`npm run tools-doc`): every tool with its arguments, and examples.
+* README: status, documentation links, development and integration test instructions.
+* Not yet run against a live instance; `docs/test-objects.md` and the live columns of `docs/coverage-matrix.md` are pending that run.
 
 ### Phase 4: moving configuration between instances
 

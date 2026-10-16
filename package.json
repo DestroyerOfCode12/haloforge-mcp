@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:integration": "RUN_INTEGRATION=1 vitest run tests/integration",
     "coverage-matrix": "tsx scripts/coverage-matrix.ts",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "tools-doc": "tsx scripts/tools-doc.ts",
+    "fake-halo": "tsx tests/fixtures/fake-halo.ts"
   },
   "keywords": [
     "mcp",
