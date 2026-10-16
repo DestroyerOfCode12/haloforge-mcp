@@ -16,6 +16,8 @@ import { createLayoutTools } from "./config/layouts.js";
 import { createReportTools } from "./config/reports.js";
 import { createDashboardTools } from "./config/dashboards.js";
 import { createDiagnosticTools } from "./config/diagnostics.js";
+import { createExportCompareTools } from "../transfer/export-compare.js";
+import { createCopyTool } from "../transfer/copy.js";
 import { AuditLog } from "../safety/audit.js";
 import { ToolAccess, canDelete, canWrite, checkAccess, shouldRegister } from "../safety/policy.js";
 
@@ -163,7 +165,9 @@ export function allToolDefinitions(): ToolDefinition[] {
     ...createLayoutTools(),
     ...createReportTools(),
     ...createDashboardTools(),
-    ...createDiagnosticTools()
+    ...createDiagnosticTools(),
+    ...createExportCompareTools(),
+    createCopyTool()
   );
   return tools;
 }
@@ -190,12 +194,14 @@ export function wrapTool(tool: ToolDefinition, manager: InstanceManager, audit: 
       const { instance, ...args } = rawArgs as Record<string, unknown> & { instance?: string };
       let resolved;
       try {
-        resolved = manager.resolve(instance);
+        const target = tool.targetInstanceArg ? (args[tool.targetInstanceArg] as string | undefined) : undefined;
+        resolved = manager.resolve(target ?? instance);
       } catch (err) {
         return errorResult((err as Error).message);
       }
       const { access, resources } = tool.accessFor ? tool.accessFor(args) : { access: tool.access, resources: tool.resources };
-      const dryRun = tool.supportsDryRun === true && access === "write" && args.dry_run === true;
+      const requestedDryRun = args.dry_run === undefined ? tool.dryRunByDefault === true : args.dry_run === true;
+      const dryRun = tool.supportsDryRun === true && access === "write" && requestedDryRun;
       const refusal = checkAccess(access, resolved.config, resources ?? [], dryRun);
       if (refusal) return errorResult(refusal);
       return tool.handler(args, { ...resolved, audit, toolName: tool.name, manager });

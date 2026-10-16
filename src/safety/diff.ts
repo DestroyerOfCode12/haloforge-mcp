@@ -11,6 +11,9 @@ import { DEFAULT_MATCH_KEYS, MergeRules, isPlainObject, matchKeyFor } from "./me
 
 export const NOT_SET = "(not set)";
 
+/** Keys tried for matching array items when the rules give none that fit. */
+const FALLBACK_KEYS = ["fieldid", "field_id", "guid", "name"];
+
 export interface Change {
   path: string;
   before: unknown;
@@ -46,9 +49,10 @@ function show(v: unknown): unknown {
 function diffArrays(before: unknown[], after: unknown[], candidates: string[], path: string, out: Change[]): void {
   const afterObjs = after.filter(isPlainObject);
   const beforeObjs = before.filter(isPlainObject);
+  const keys = [...candidates, ...FALLBACK_KEYS.filter((k) => !candidates.includes(k))];
   const key =
     afterObjs.length === after.length && beforeObjs.length === before.length
-      ? candidates.find((k) => afterObjs.every((i) => matchKeyFor(i, [k])) && beforeObjs.every((i) => matchKeyFor(i, [k])))
+      ? keys.find((k) => afterObjs.every((i) => matchKeyFor(i, [k])) && beforeObjs.every((i) => matchKeyFor(i, [k])))
       : undefined;
 
   if (!key) {

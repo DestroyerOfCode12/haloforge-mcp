@@ -26,6 +26,8 @@ export interface ConfigResource {
   uiPath: string;
   /** Known to be read only through the API */
   readOnly?: boolean;
+  /** Records are operational data rather than configuration; skipped by "all" exports unless asked */
+  data?: boolean;
   notes?: string;
 }
 
@@ -103,13 +105,13 @@ export const CONFIG_RESOURCES: ConfigResource[] = [
   { resource: "Holiday", area: S, uiPath: "Configuration > Service Level Agreements > Workdays > Holidays (to confirm)" },
 
   // People and structure
-  { resource: "Agent", area: P, uiPath: "Configuration > Teams and Agents > Agents" },
+  { resource: "Agent", data: true, area: P, uiPath: "Configuration > Teams and Agents > Agents" },
   { resource: "Team", area: P, uiPath: "Configuration > Teams and Agents > Teams" },
   { resource: "Roles", area: P, uiPath: "Configuration > Teams and Agents > Roles" },
   { resource: "UserRoles", area: P, uiPath: "Configuration > Users > User Roles (to confirm)" },
-  { resource: "Users", area: P, uiPath: "Users" },
-  { resource: "Client", area: P, uiPath: "Customers" },
-  { resource: "Site", area: P, uiPath: "Customers > Sites" },
+  { resource: "Users", data: true, area: P, uiPath: "Users" },
+  { resource: "Client", data: true, area: P, uiPath: "Customers" },
+  { resource: "Site", data: true, area: P, uiPath: "Customers > Sites" },
   { resource: "Organisation", area: P, uiPath: "Configuration > Organisation (to confirm)" },
   { resource: "TopLevel", area: P, uiPath: "Configuration > Customers > Top Levels (to confirm)" },
   { resource: "DistributionLists", area: P, uiPath: "Configuration > Email > Distribution Lists (to confirm)", notes: "Needs a closer look: unexpected list shape" },
@@ -121,8 +123,8 @@ export const CONFIG_RESOURCES: ConfigResource[] = [
   { resource: "ServiceCategory", area: C, uiPath: "Configuration > Services > Service Categories (to confirm)" },
   { resource: "ServiceStatus", area: C, uiPath: "Configuration > Services > Service Statuses (to confirm)" },
   { resource: "ServiceRestriction", area: C, uiPath: "Configuration > Services > Restrictions (to confirm)" },
-  { resource: "Downtime", area: C, uiPath: "Service Catalogue > Scheduled Downtime (to confirm)", notes: "Needs a closer look: list failed or had an unexpected shape" },
-  { resource: "KBArticle", area: C, uiPath: "Knowledge Base" },
+  { resource: "Downtime", data: true, area: C, uiPath: "Service Catalogue > Scheduled Downtime (to confirm)", notes: "Needs a closer look: list failed or had an unexpected shape" },
+  { resource: "KBArticle", data: true, area: C, uiPath: "Knowledge Base" },
   { resource: "FAQLists", area: C, uiPath: "Configuration > Knowledge Base > FAQ Lists (to confirm)" },
   { resource: "StyleProfile", area: C, uiPath: "Configuration > Self Service Portal > Style Profiles (to confirm)" },
   { resource: "Translation", area: C, uiPath: "Configuration > Language > Translations (to confirm)" },
@@ -131,7 +133,7 @@ export const CONFIG_RESOURCES: ConfigResource[] = [
   { resource: "AssetType", area: A, uiPath: "Configuration > Asset Management > Asset Types", notes: "fields and tab_config" },
   { resource: "AssetTypeInfo", area: A, uiPath: "Configuration > Asset Management > Asset Types (fields) (to confirm)" },
   { resource: "AssetGroup", area: A, uiPath: "Configuration > Asset Management > Asset Groups" },
-  { resource: "SoftwareLicence", area: A, uiPath: "Assets > Software Licences (to confirm)", notes: "Needs a closer look: unexpected list shape" },
+  { resource: "SoftwareLicence", data: true, area: A, uiPath: "Assets > Software Licences (to confirm)", notes: "Needs a closer look: unexpected list shape" },
 
   // Reporting
   { resource: "Report", area: R, uiPath: "Reporting > Reports", notes: "Run with loadreport=true; chart settings charttype, xaxis, yaxis and others" },
@@ -154,10 +156,10 @@ export const CONFIG_RESOURCES: ConfigResource[] = [
   { resource: "ChargeRate", area: O, uiPath: "Configuration > Financials > Charge Rates (to confirm)" },
   { resource: "CostCentres", area: O, uiPath: "Configuration > Financials > Cost Centres (to confirm)" },
   { resource: "BookingType", area: O, uiPath: "Configuration > Calendars > Appointment Types (to confirm)" },
-  { resource: "Supplier", area: O, uiPath: "Suppliers" },
-  { resource: "SupplierContract", area: O, uiPath: "Suppliers > Contracts (to confirm)" },
-  { resource: "ClientContract", area: O, uiPath: "Customers > Contracts (to confirm)", notes: "Needs a closer look: unexpected list shape" },
-  { resource: "Item", area: O, uiPath: "Items" },
+  { resource: "Supplier", data: true, area: O, uiPath: "Suppliers" },
+  { resource: "SupplierContract", data: true, area: O, uiPath: "Suppliers > Contracts (to confirm)" },
+  { resource: "ClientContract", data: true, area: O, uiPath: "Customers > Contracts (to confirm)", notes: "Needs a closer look: unexpected list shape" },
+  { resource: "Item", data: true, area: O, uiPath: "Items" },
   { resource: "ResourceType", area: O, uiPath: "Configuration > Calendars > Resource Types (to confirm)" },
   { resource: "ReleaseType", area: O, uiPath: "Configuration > Release Management > Release Types (to confirm)" },
   { resource: "PipelineStages", area: O, uiPath: "Configuration > Release Management > Pipeline Stages (to confirm)" },

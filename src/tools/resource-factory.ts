@@ -44,6 +44,10 @@ export interface ToolDefinition {
   resources?: string[];
   /** The tool honours dry_run: true by only reading, so a dry run may run on any instance */
   supportsDryRun?: boolean;
+  /** dry_run is assumed when the caller does not pass it */
+  dryRunByDefault?: boolean;
+  /** Argument naming the instance that is written to, when it is not "instance" */
+  targetInstanceArg?: string;
   /** For tools whose access depends on the arguments (for example a raw API request) */
   accessFor?: (args: Record<string, unknown>) => { access: ToolAccess; resources?: string[] };
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
