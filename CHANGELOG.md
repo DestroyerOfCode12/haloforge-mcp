@@ -1,0 +1,21 @@
+# Changelog
+
+## 2.0.0 (in progress)
+
+### Phase 2: core improvements
+
+* Renamed to HaloForge MCP (`haloforge-mcp` package, server and bin). Based on halo-itsm-mcp (MIT).
+* Safety modes: `HALO_MODE` read (default), write or full; `HALO_DISABLE_DELETE` true by default; optional `HALO_WRITE_ALLOWLIST`; all settable per instance.
+* Dry run with a field by field before and after diff on every create or update tool.
+* Safe merge of nested arrays (ticket type fields and user fields, workflow steps and stages, and any array matched by `id`), with `_remove`, `merge`, `replace_arrays` and `full_object` options. Unchanged updates are skipped.
+* Audit log of every write in `logs/audit.jsonl` (field paths only, secrets masked).
+* Several instances with `HALO_INSTANCES`; optional `instance` argument on every tool; `halo_instances_list`. The original single instance variables still work.
+* Output control: `fields`, `all_pages`, `max_items`, compact summaries with an explicit notice instead of silent truncation. List responses with named record keys (for example `tickets`) are now unwrapped.
+* Batch writes: create or update tools accept a list sent in one API call.
+* Reliability: proxy support through `HTTPS_PROXY` and `NO_PROXY`, clearer authentication and network errors, retries with backoff for reads (writes retried only on 429), tenant support on token requests.
+* `halo_api_request` general fallback.
+* ESLint and vitest with a mocked fetch.
+
+### Phase 1: coverage matrix
+
+* Catalogue of 96 configuration resources and a read only matrix generator (`npm run coverage-matrix`).

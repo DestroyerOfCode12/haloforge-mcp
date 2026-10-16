@@ -5,3 +5,7 @@ dist/
 .DS_Store
 .claude/
 prompts/
+logs/
+.env.*
+!.env.example
+coverage/

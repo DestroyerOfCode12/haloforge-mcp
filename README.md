@@ -1,564 +1,213 @@
-# Halo ITSM MCP Server
+# HaloForge MCP
 
-A Model Context Protocol (MCP) server that exposes the full Halo ITSM REST API to AI assistants. Provides 172 tools across 43 resource domains, enabling AI-driven IT service management through any MCP-compatible client.
+An MCP server for HaloITSM that can read, and safely configure, what an administrator configures in Halo: ticket types and their layouts, field groups, fields, workflows, rules, SLAs, the portal, the CMDB, reports and dashboards. It is designed to be safe to point at a production instance. By default it cannot write or delete anything.
 
-Built by the City of San Marcos, CA - IT Division.
+Based on [halo-itsm-mcp](https://github.com/omichelbraga/halo-itsm-mcp) by omichelbraga (MIT licence). HaloForge keeps the original's tools, transports and OAuth proxy, and adds safety modes, dry runs, safe merges, an audit log, support for several instances and output control.
+
+> Status: version 2 is under active development. Phase 2 (core improvements) is in place; full configuration coverage, export, compare and copy are coming. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
-- **172 tools** across 43 Halo ITSM resource domains (tickets, agents, assets, categories, SLAs, priorities, workflows, services, and more)
-- **6 read-only MCP resources** for configuration context (statuses, teams, agents, ticket types, rate limit status)
-- **Three transport modes**: stdio, HTTP (Streamable HTTP + SSE), HTTP with OAuth proxy
-- **Two authentication modes**: environment-based Client Credentials, or OAuth proxy (credentials passed at connection time)
-- **PKCE auto-injection** for OAuth clients that don't natively support it
-- **Rate limiting**: 700 requests per 5-minute sliding window with 80% usage warnings
-- **Circuit breaker**: pauses requests after 5 consecutive failures (30-second cooldown)
-- **Retry logic**: exponential backoff with jitter for 429 and 5xx responses
-- **Docker-ready**: multi-stage build, non-root user, health check endpoint, read-only filesystem
-- **Reverse proxy compatible**: runs plain HTTP internally, TLS handled externally
-- **Security hardened**: security headers on all responses, input size validation, fetch timeouts, error sanitization, secret redaction in logs
+* **Safety modes per instance**: `read` (the default) registers no create or update tools; `write` allows create and update; `full` also allows delete, but only when `HALO_DISABLE_DELETE=false` is set explicitly. An optional write allowlist limits which resources can be written.
+* **Dry run and diff**: every create or update tool accepts `dry_run: true`. It reads the current record and returns a field by field before and after diff without saving.
+* **Safe merge for nested arrays**: Halo replaces nested arrays (ticket type fields, field group fields, workflow steps, dashboard widgets) on update. HaloForge reads the record, merges your change by match key and writes the complete array, so a one field change never wipes a layout.
+* **Audit log**: every write is appended to `logs/audit.jsonl` with the time, instance, tool, resource, IDs and the changed field paths (never values). Secrets are masked.
+* **Several instances**: `HALO_INSTANCES=trial,prod`. Every tool takes an optional `instance` argument.
+* **Output control**: `fields` to return only chosen fields, `all_pages: true` with `max_items`, and a compact summary when output would be too large. Output is never cut off silently.
+* **Batch writes**: create or update tools accept a list and send one API call.
+* **Reliability**: proxy support (`HTTPS_PROXY` and `NO_PROXY`), clear authentication errors, retries with backoff (reads only, so a create is never sent twice), a rate limiter (700 requests per 5 minutes per instance) and a circuit breaker.
+* **General fallback**: `halo_api_request` reaches any API path. GET always works; POST and DELETE follow the instance's mode.
+* **Transports**: stdio for Claude Desktop and Claude Code, Streamable HTTP for Docker, and HTTP with an OAuth proxy for the Claude connector UI.
 
-## Supported Resource Domains
+## Safety modes
 
-| Domain | Tools | API Path |
-|--------|-------|----------|
-| Tickets | list, get, upsert, delete | /Tickets |
-| Actions | list, get, upsert, delete | /Actions |
-| Agents | list, get, upsert, delete, **me** | /Agent |
-| Assets | list, get, upsert, delete | /Asset |
-| Asset Groups | list, get, upsert, delete | /AssetGroup |
-| Asset Types | list, get, upsert, delete | /AssetType |
-| Attachments | list, get, upsert, delete | /Attachment |
-| Appointments | list, get, upsert, delete | /Appointment |
-| Audit | list, get, upsert, delete | /Audit |
-| Canned Text | list, get, upsert, delete | /CannedText |
-| Categories | list, get, upsert, delete | /Category |
-| Clients | list, get, upsert, delete | /Client |
-| Contracts | list, get, upsert, delete | /ClientContract |
-| Downtime | list, get, upsert, delete | /Downtime |
-| Feedback | list, get, upsert, delete | /Feedback |
-| Fields | list, get, upsert, delete | /Field |
-| Holidays | list, get, upsert, delete | /Holiday |
-| Invoices | list, get, upsert, delete | /Invoice |
-| Items | list, get, upsert, delete | /Item |
-| Knowledge Base | list, get, upsert, delete | /KBArticle |
-| Opportunities | list, get, upsert, delete | /Opportunities |
-| Organisations | list, get, upsert, delete | /Organisation |
-| Priorities | list, get, upsert, delete | /Priority |
-| Projects | list, get, upsert, delete | /Projects |
-| Purchase Orders | list, get, upsert, delete | /PurchaseOrder |
-| Quotes | list, get, upsert, delete | /Quotation |
-| Reports | list, get, upsert, delete | /Report |
-| Services | list, get, upsert, delete | /Service |
-| Service Status | list, get, upsert, delete | /ServiceStatus |
-| Sites | list, get, upsert, delete | /Site |
-| SLAs | list, get, upsert, delete | /SLA |
-| Software Licences | list, get, upsert, delete | /SoftwareLicence |
-| Status | list, get, upsert, delete | /Status |
-| Suppliers | list, get, upsert, delete | /Supplier |
-| Tags | list, get, upsert, delete | /Tags |
-| Teams | list, get, upsert, delete | /Team |
-| Ticket Rules | list, get, upsert, delete | /TicketRules |
-| Ticket Types | list, get, upsert, delete | /TicketType |
-| Timesheets | list, get, upsert | /Timesheet |
-| Top Level | list, get, upsert, delete | /TopLevel |
-| Users | list, get, upsert, delete | /Users |
-| Workdays | list, get, upsert, delete | /Workday |
-| Workflows | list, get, upsert, delete | /Workflow |
+| Setting | Default | Effect |
+|---|---|---|
+| `HALO_MODE` | `read` | `read`: list and get only. `write`: also create and update. `full`: also delete (if enabled). |
+| `HALO_DISABLE_DELETE` | `true` | Delete tools are registered only when this is `false` and an instance is in `full` mode. |
+| `HALO_WRITE_ALLOWLIST` | not set | Comma separated resources that may be written, for example `Report,DashboardLinks,Lookup`. API names (`TicketType`) and tool names (`tickettypes`) both work. |
 
-## Prerequisites
+Each can be set per instance (`HALO_TRIAL_MODE`, `HALO_PROD_DISABLE_DELETE`, `HALO_PROD_WRITE_ALLOWLIST`); per instance values override the global ones.
 
-- Node.js 20 or later
-- A Halo ITSM instance with API access enabled
-- A Halo API application (Configuration > Integrations > HaloPSA API) with Client Credentials grant type
+When several instances are configured, a tool is registered if any instance could use it, and every call is checked against the selected instance. A write aimed at a read mode instance is refused with a clear message. Dry runs only read, so they are allowed on any instance; this lets you preview a change against production without any risk.
 
-## Quick Start
+## Setup
 
-### 1. Clone and install
+### Requirements
+
+* Node.js 20 or later
+* A HaloITSM API application (Configuration > Integrations > Halo API) using **Client ID and Secret (Services)** with the `all` scope. A newly created application can return 401 for a minute or two.
+
+### Install and build
 
 ```bash
-git clone https://github.com/omichelbraga/halo-itsm-mcp.git
-cd halo-itsm-mcp
-npm install
+git clone https://github.com/DestroyerOfCode12/haloforge-mcp.git
+cd haloforge-mcp
+npm ci
 npm run build
 ```
 
-### 2. Configure
-
-Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-Minimum configuration for OAuth proxy mode:
+### Configure one instance (original variables)
 
 ```env
-HALO_BASE_URL=https://yourinstance.haloitsm.com
-MCP_TRANSPORT=http
-MCP_AUTH=oauth
-MCP_PUBLIC_URL=https://your-public-url.com
-```
-
-### 3. Run
-
-```bash
-node --env-file=.env dist/index.js
-```
-
-The server starts on port 3000 and logs connection details to the console.
-
-## Authentication Modes
-
-### OAuth Proxy Mode (Recommended)
-
-Credentials are passed by the MCP client at connection time. No secrets stored on the server.
-
-```env
-HALO_BASE_URL=https://yourinstance.haloitsm.com
-MCP_TRANSPORT=http
-MCP_AUTH=oauth
-MCP_PUBLIC_URL=https://your-public-url.com
-```
-
-The server acts as an OAuth Authorization Server to the MCP client, then internally exchanges the credentials with Halo using Client Credentials grant. The Halo API application only needs Client Credentials enabled (not Authorization Code).
-
-How the OAuth bridge works:
-
-1. MCP client sends credentials via the standard OAuth Authorization Code + PKCE flow
-2. Server auto-approves the authorization request (no user interaction)
-3. Client exchanges the authorization code for a token
-4. Server takes the client_id + client_secret and calls Halo's token endpoint with `grant_type=client_credentials`
-5. The Halo access token is returned to the MCP client
-6. All subsequent MCP API calls use the Halo token directly
-
-### Environment Auth Mode
-
-Credentials stored in environment variables. Useful for trusted environments or headless deployments.
-
-```env
-HALO_BASE_URL=https://yourinstance.haloitsm.com
+HALO_BASE_URL=https://yourcompany.haloitsm.com
 HALO_CLIENT_ID=your_client_id
 HALO_CLIENT_SECRET=your_client_secret
-MCP_TRANSPORT=http
-MCP_AUTH=env
+HALO_MODE=read
 ```
 
-### Stdio Mode
-
-For local use with Claude Desktop or Claude Code. No HTTP server, communicates over stdin/stdout.
+### Configure several instances
 
 ```env
-HALO_BASE_URL=https://yourinstance.haloitsm.com
-HALO_CLIENT_ID=your_client_id
-HALO_CLIENT_SECRET=your_client_secret
+HALO_INSTANCES=trial,prod
+
+HALO_TRIAL_BASE_URL=https://yourcompany-trial.haloitsm.com
+HALO_TRIAL_CLIENT_ID=...
+HALO_TRIAL_CLIENT_SECRET=...
+HALO_TRIAL_MODE=write
+
+HALO_PROD_BASE_URL=https://yourcompany.haloitsm.com
+HALO_PROD_CLIENT_ID=...
+HALO_PROD_CLIENT_SECRET=...
+HALO_PROD_MODE=read
 ```
 
-Run without setting `MCP_TRANSPORT` (defaults to stdio).
+The first instance is the default unless `HALO_DEFAULT_INSTANCE` names another. If neither `HALO_INSTANCES` nor `HALO_BASE_URL` is set, any `HALO_<NAME>_BASE_URL` variables are picked up automatically.
 
-## Connecting MCP Clients
+Keep secrets in environment variables or a git ignored `.env` file (see [.env.example](.env.example)). Never commit them.
 
-### Claude.ai Connector
+### Other settings
 
-1. Run the server with `MCP_AUTH=oauth` behind HTTPS (reverse proxy or ngrok)
-2. In Claude, go to Settings and add a new MCP integration:
-   - **URL**: `https://your-public-url.com`
-   - **OAuth Client ID**: your Halo API Client ID
-   - **OAuth Client Secret**: your Halo API Client Secret
-3. Claude will complete the OAuth handshake automatically
+| Variable | Default | Purpose |
+|---|---|---|
+| `HALO_AUDIT_LOG` | `logs/audit.jsonl` | Audit log path, or `off` |
+| `HALO_MAX_OUTPUT_CHARS` | `80000` | Size at which output becomes a compact summary |
+| `HALO_MAX_RETRIES` | `3` | Retries for reads (and for writes only on HTTP 429) |
+| `HTTPS_PROXY`, `NO_PROXY` | not set | Outbound proxy; used automatically when set |
+| `HALO_DISABLE_PROXY` | not set | `true` ignores proxy variables |
+| `HALO_SCOPE`, `HALO_TENANT` | `all`, not set | Token scope and tenant (also per instance) |
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `MCP_AUTH` | `env` | `env` or `oauth` (HTTP only) |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
-### n8n
+## Claude Desktop
 
-1. Add an **MCP Client** node to your workflow
-2. Configure the node:
-   - **Server Transport**: HTTP Streamable
-   - **MCP Endpoint URL**: `https://your-public-url.com/mcp`
-   - **Authentication**: MCP OAuth2
-3. Create a new MCP OAuth2 credential:
-   - **Grant Type**: PKCE
-   - **Authorization URL**: `https://your-public-url.com/authorize`
-   - **Access Token URL**: `https://your-public-url.com/token`
-   - **Client ID**: your Halo API Client ID
-   - **Client Secret**: your Halo API Client Secret
-   - **Scope**: `all`
-   - **Authentication**: Body
-4. Click **Connect to MCP**, then select your tool from the dropdown
+Two instances: the trial in write mode and production in read mode.
 
-> **Note**: Use the **PKCE** grant type in n8n, not plain Authorization Code. The MCP protocol requires PKCE (OAuth 2.1).
+### macOS
 
-### Claude Desktop (stdio)
-
-Add to your `claude_desktop_config.json`:
+`~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
-    "halo-itsm": {
+    "haloforge": {
       "command": "node",
-      "args": ["/path/to/halo-itsm-mcp/dist/index.js"],
+      "args": ["/Users/you/haloforge-mcp/dist/index.js"],
       "env": {
-        "HALO_BASE_URL": "https://yourinstance.haloitsm.com",
-        "HALO_CLIENT_ID": "your_client_id",
-        "HALO_CLIENT_SECRET": "your_client_secret"
+        "HALO_INSTANCES": "trial,prod",
+        "HALO_TRIAL_BASE_URL": "https://yourcompany-trial.haloitsm.com",
+        "HALO_TRIAL_CLIENT_ID": "your_trial_client_id",
+        "HALO_TRIAL_CLIENT_SECRET": "your_trial_client_secret",
+        "HALO_TRIAL_MODE": "write",
+        "HALO_PROD_BASE_URL": "https://yourcompany.haloitsm.com",
+        "HALO_PROD_CLIENT_ID": "your_prod_client_id",
+        "HALO_PROD_CLIENT_SECRET": "your_prod_client_secret",
+        "HALO_PROD_MODE": "read",
+        "HALO_AUDIT_LOG": "/Users/you/haloforge-mcp/logs/audit.jsonl"
       }
     }
   }
 }
 ```
 
-### Claude Code (stdio)
+### Windows
 
-Add to your Claude Code MCP configuration:
+`%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
-    "halo-itsm": {
+    "haloforge": {
       "command": "node",
-      "args": ["--env-file=/path/to/.env", "/path/to/halo-itsm-mcp/dist/index.js"]
+      "args": ["C:\\Users\\you\\haloforge-mcp\\dist\\index.js"],
+      "env": {
+        "HALO_INSTANCES": "trial,prod",
+        "HALO_TRIAL_BASE_URL": "https://yourcompany-trial.haloitsm.com",
+        "HALO_TRIAL_CLIENT_ID": "your_trial_client_id",
+        "HALO_TRIAL_CLIENT_SECRET": "your_trial_client_secret",
+        "HALO_TRIAL_MODE": "write",
+        "HALO_PROD_BASE_URL": "https://yourcompany.haloitsm.com",
+        "HALO_PROD_CLIENT_ID": "your_prod_client_id",
+        "HALO_PROD_CLIENT_SECRET": "your_prod_client_secret",
+        "HALO_PROD_MODE": "read",
+        "HALO_AUDIT_LOG": "C:\\Users\\you\\haloforge-mcp\\logs\\audit.jsonl"
+      }
     }
   }
 }
 ```
 
-## Docker Deployment
+Set `HALO_AUDIT_LOG` to an absolute path, because Claude Desktop starts the server from its own working directory.
 
-### Build and run
-
-```bash
-docker build -t halo-itsm-mcp .
-docker run -d \
-  --name halo-itsm-mcp \
-  -p 3000:3000 \
-  -e HALO_BASE_URL=https://yourinstance.haloitsm.com \
-  -e MCP_PUBLIC_URL=https://your-public-url.com \
-  halo-itsm-mcp
-```
-
-### Docker Compose
+### Claude Code
 
 ```bash
-# Configure .env with HALO_BASE_URL and MCP_PUBLIC_URL, then:
-docker compose up -d
+claude mcp add haloforge -e HALO_BASE_URL=https://yourcompany.haloitsm.com \
+  -e HALO_CLIENT_ID=... -e HALO_CLIENT_SECRET=... -- node /path/to/haloforge-mcp/dist/index.js
 ```
 
-The container runs as a non-root user, exposes port 3000, and includes a health check at `/health`. Docker Compose also enforces a read-only filesystem and `no-new-privileges` security option.
+## HTTP, Docker and the OAuth proxy
 
-### Behind a Reverse Proxy
+The original HTTP transports are unchanged:
 
-The server runs plain HTTP on port 3000. TLS termination is handled by your reverse proxy (nginx, Caddy, Traefik, etc.).
-
-Set `MCP_PUBLIC_URL` to the external HTTPS URL so OAuth metadata and redirect URIs resolve correctly:
-
-```env
-MCP_PUBLIC_URL=https://halo-mcp.yourdomain.com
-```
-
-Example nginx configuration:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name halo-mcp.yourdomain.com;
-
-    ssl_certificate     /etc/ssl/certs/your-cert.pem;
-    ssl_certificate_key /etc/ssl/private/your-key.pem;
-
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # SSE support
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 86400s;
-    }
-}
-```
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `HALO_BASE_URL` | Yes | - | Halo instance URL (no trailing slash) |
-| `MCP_TRANSPORT` | No | `stdio` | Transport mode: `stdio` or `http` |
-| `MCP_AUTH` | No | `env` | Auth mode: `env` or `oauth` |
-| `MCP_PORT` | No | `3000` | HTTP server port |
-| `MCP_PUBLIC_URL` | No | `http://localhost:3000` | External HTTPS URL (for OAuth metadata) |
-| `HALO_CLIENT_ID` | env mode | - | Halo API Client ID |
-| `HALO_CLIENT_SECRET` | env mode | - | Halo API Client Secret |
-| `HALO_SCOPE` | No | `all` | API permission scope |
-| `HALO_TENANT` | No | - | Tenant name (multi-tenant deployments) |
-| `LOG_LEVEL` | No | `info` | Log level: `debug`, `info`, `warn`, `error` |
-
-## API Endpoints
-
-When running in HTTP mode, the server exposes:
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/mcp` | POST | Bearer | MCP message endpoint (initialize, tool calls) |
-| `/mcp` | GET | Bearer | SSE stream for server-sent events |
-| `/mcp` | DELETE | Bearer | Close an MCP session |
-| `/health` | GET | None | Health check (returns `{"status":"ok"}`) |
-| `/.well-known/oauth-authorization-server` | GET | None | OAuth server metadata (RFC 8414) |
-| `/.well-known/oauth-protected-resource` | GET | None | Protected resource metadata (RFC 9728) |
-| `/authorize` | GET | None | OAuth authorization endpoint |
-| `/token` | POST | None | OAuth token endpoint |
-| `/register` | POST | None | Dynamic client registration (RFC 7591) |
-
-## Tool Reference
-
-All tools follow the naming pattern `halo_{resource}_{operation}`:
-
-| Operation | Description | Example |
-|-----------|-------------|---------|
-| `_list` | Search/list with filters and pagination | `halo_tickets_list` |
-| `_get` | Get a single record by ID | `halo_tickets_get` |
-| `_upsert` | Create (no id) or update (with id) | `halo_tickets_upsert` |
-| `_delete` | Delete by ID | `halo_tickets_delete` |
-
-Special tools:
-
-| Tool | Description |
-|------|-------------|
-| `halo_agents_me` | Get the currently authenticated agent's info |
-
-Common list parameters supported across all domains:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `page_size` | number | Results per page (default varies by endpoint) |
-| `page_no` | number | Page number (1-based) |
-| `order` | string | Field to sort ascending |
-| `orderdesc` | string | Field to sort descending |
-| `search` | string | Full-text search query |
-
-The `halo_tickets_list` tool supports 50+ additional filter parameters including `open_only`, `agent_id`, `status_id`, `priority_id`, `client_id`, `site_id`, `category_1`, `advanced_search`, and more. The `halo_categories_list` tool supports `type_id` (1-4) to filter by category level.
-
-## Rate Limiting and Resilience
-
-The server implements multiple layers of protection against API overuse and transient failures:
-
-- **Sliding window rate limiter**: 700 requests per 5-minute window, with warnings at 80% capacity and automatic request delays when the limit is reached
-- **Circuit breaker**: opens after 5 consecutive API failures, pauses all requests for 30 seconds, then auto-resets
-- **Retry with exponential backoff**: 429 (rate limited) responses retry up to 3 times; 500/502/503 responses retry once. Backoff includes random jitter to prevent thundering herd
-- **Token caching**: access tokens are cached in memory and auto-refreshed 60 seconds before expiry
-- **Request deduplication**: concurrent token refresh requests are deduplicated to a single HTTP call
-- **Automatic 401 recovery**: if a Halo API call returns 401, the token is force-refreshed and the request is retried once
-
-## Health Check
-
-The `/health` endpoint returns a minimal status response without requiring authentication. No server details are exposed to prevent information disclosure.
+* `MCP_TRANSPORT=http MCP_AUTH=env`: credentials from the environment, MCP endpoint at `/mcp`, health check at `/health`.
+* `MCP_TRANSPORT=http MCP_AUTH=oauth`: only `HALO_BASE_URL` (and `MCP_PUBLIC_URL`) are needed; the MCP client supplies the Halo client ID and secret through the standard OAuth flow and the server exchanges them with Halo using client credentials. Safety settings (`HALO_MODE` and the rest) still apply.
 
 ```bash
-curl http://localhost:3000/health
+docker compose up -d --build
 ```
 
-```json
-{
-  "status": "ok"
-}
+The compose file mounts `./logs` for the audit log. TLS is expected to be handled by a reverse proxy.
+
+## Using the tools
+
+Every resource has `halo_<resource>_list` and `halo_<resource>_get`, plus `_upsert` and `_delete` when the mode allows. Some examples:
+
+```text
+halo_tickettypes_list   { "fields": ["id", "name"], "all_pages": true }
+halo_tickettypes_get    { "id": 12, "includedetails": true, "fields": ["id", "name", "fields"] }
+halo_tickettypes_upsert { "data": { "id": 12, "fields": [{ "fieldid": 205, "seq": 3 }] }, "dry_run": true }
+halo_reports_upsert     { "instance": "trial", "data": [{ "name": "MCP TEST | Open by team" }, { "name": "MCP TEST | Closed by team" }] }
+halo_api_request        { "method": "GET", "path": "/Lookup", "query": { "lookupid": 41 } }
+halo_instances_list     {}
 ```
 
-## Project Structure
+### Nested array merge
 
-```
-halo-itsm-mcp/
-├── src/
-│   ├── index.ts                    # Entry point, transport setup, route config
-│   ├── auth/
-│   │   ├── oauth2.ts               # Client Credentials token management + caching
-│   │   └── proxy-provider.ts       # Custom OAuth server (AuthCode+PKCE -> ClientCreds bridge)
-│   ├── client/
-│   │   ├── halo-client.ts          # HTTP client with retry, circuit breaker, token injection
-│   │   └── rate-limiter.ts         # Sliding window rate limiter (700 req / 5 min)
-│   ├── resources/
-│   │   └── context.ts              # MCP read-only resources (config, schemas)
-│   ├── tools/
-│   │   ├── registry.ts             # Tool registry (builds and registers all 172 tools)
-│   │   ├── resource-factory.ts     # Generic CRUD tool factory
-│   │   └── resources/              # 43 resource domain definitions
-│   │       ├── tickets.ts          # Ticket management (50+ filter params)
-│   │       ├── actions.ts          # Ticket actions/notes
-│   │       ├── agents.ts           # Agent management + /Agent/me
-│   │       ├── assets.ts           # IT asset tracking
-│   │       ├── asset-groups.ts     # Asset grouping
-│   │       ├── asset-types.ts      # CMDB asset type definitions
-│   │       ├── attachments.ts      # File attachments
-│   │       ├── appointments.ts     # Scheduling
-│   │       ├── audit.ts            # Audit trail
-│   │       ├── canned-text.ts      # Response templates
-│   │       ├── categories.ts       # Ticket categorization (4 levels)
-│   │       ├── clients.ts          # Client/customer records
-│   │       ├── contracts.ts        # Service contracts
-│   │       ├── downtime.ts         # Maintenance windows
-│   │       ├── feedback.ts         # Customer satisfaction
-│   │       ├── fields.ts           # Custom field definitions
-│   │       ├── holidays.ts         # Holiday schedules
-│   │       ├── invoices.ts         # Billing
-│   │       ├── items.ts            # Catalog items
-│   │       ├── knowledge-base.ts   # KB articles
-│   │       ├── opportunities.ts    # Sales opportunities
-│   │       ├── organisations.ts    # Organizational structure
-│   │       ├── priorities.ts       # Priority levels
-│   │       ├── projects.ts         # Project management
-│   │       ├── purchase-orders.ts  # IT procurement
-│   │       ├── quotes.ts           # Quotes
-│   │       ├── reports.ts          # Reports
-│   │       ├── services.ts         # Service catalog
-│   │       ├── service-status.ts   # Service status page
-│   │       ├── sites.ts            # Locations
-│   │       ├── sla.ts              # Service Level Agreements
-│   │       ├── software-licences.ts # Software license tracking
-│   │       ├── status.ts           # Status configuration
-│   │       ├── suppliers.ts        # Supplier records
-│   │       ├── tags.ts             # Ticket tagging
-│   │       ├── teams.ts            # Team configuration
-│   │       ├── ticket-rules.ts     # Auto-assignment rules
-│   │       ├── ticket-types.ts     # Ticket type configuration
-│   │       ├── timesheets.ts       # Time tracking
-│   │       ├── top-level.ts        # Customer hierarchy
-│   │       ├── users.ts            # End-user management
-│   │       ├── workdays.ts         # Working day definitions
-│   │       └── workflows.ts        # Workflow definitions
-│   ├── types/
-│   │   ├── config.ts               # Configuration interfaces, env loader
-│   │   └── halo.ts                 # Halo API TypeScript type definitions
-│   └── utils/
-│       └── logger.ts               # Structured stderr logger with secret redaction
-├── Dockerfile                      # Multi-stage Docker build (node:22-alpine)
-├── docker-compose.yml              # Docker Compose with health check
-├── .env.example                    # Environment variable template
-├── package.json
-├── tsconfig.json
-└── README.md
-```
+For an update, items in a nested array are matched by key (`fieldid` for ticket type fields, `id` for workflow steps and most other arrays):
 
-## Architecture
+* `{ "fieldid": 205, "seq": 3 }` changes the matching item and keeps every other field on it.
+* An item with no match is appended.
+* `{ "fieldid": 205, "_remove": true }` takes the item out of the array (it does not delete the field).
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────────────┐     ┌──────────────┐
-│  MCP Client │────>│ Reverse Proxy│────>│     MCP Server          │────>│  Halo ITSM   │
-│  (Claude,   │ TLS │ (nginx/ngrok)│ HTTP│     (Express)           │ API │  REST API    │
-│   n8n, etc) │<────│              │<────│                         │<────│              │
-└─────────────┘     └──────────────┘     │  ┌───────────────────┐  │     └──────────────┘
-                                         │  │ OAuth Server      │  │
-                                         │  │ (AuthCode -> CC)  │  │
-                                         │  ├───────────────────┤  │
-                                         │  │ Rate Limiter      │  │
-                                         │  │ Circuit Breaker   │  │
-                                         │  │ Token Auto-Refresh │  │
-                                         │  │ Auto-PKCE         │  │
-                                         │  └───────────────────┘  │
-                                         └─────────────────────────┘
-```
+Use `merge: false` to send data exactly as given, `replace_arrays: ["fields"]` to replace one array, and `full_object: true` to send the whole current record with your change applied. Updates that would change nothing are skipped.
 
-## Halo API Application Setup
+## Relationship to Halo's native MCP
 
-1. In Halo ITSM, go to **Configuration > Integrations > HaloPSA API**
-2. Create a new API application
-3. Set **Auth Method** to **Client ID and Secret (Services)**
-4. Under **Permissions**, grant access to the resource domains you need (or select all)
-5. Copy the **Client ID** and **Client Secret**
-
-The server uses Client Credentials grant regardless of the authentication mode selected. The OAuth proxy translates the MCP protocol's Authorization Code + PKCE flow into Client Credentials transparently.
+Halo ships its own MCP endpoint at `{base}/api/mcp`. It covers service desk work (tickets, knowledge base, users, sites, clients and assets) and has no configuration tools. HaloForge focuses on configuration and administration and does not try to duplicate the native server's service desk tools. Use both side by side: the native MCP for day to day ticket work, HaloForge for building and reviewing configuration.
 
 ## Development
 
 ```bash
-# Install dependencies
-npm install
-
-# Build TypeScript
-npm run build
-
-# Run with environment file
-node --env-file=.env dist/index.js
-
-# Clean build artifacts
-npm run clean
+npm run build      # compile TypeScript
+npm run lint       # ESLint
+npm test           # unit tests (vitest, fetch is mocked)
+npm run coverage-matrix   # regenerate docs/coverage-matrix.md (add -- --live to query an instance, read only)
 ```
 
-## Troubleshooting
+Rules for contributions: never delete anything on an instance during development (rename or deactivate instead), prefix test objects with `MCP TEST |`, use only a trial instance, and keep company names, client names, instance URLs, record data and secrets out of code, docs, tests and commit messages.
 
-**"Configuration error: HALO_BASE_URL required"**
-Node.js doesn't auto-load `.env` files. Use `node --env-file=.env dist/index.js` instead of `node dist/index.js`.
+## Licence
 
-**"Invalid Host" errors behind a reverse proxy**
-The server binds to `0.0.0.0` with DNS rebinding protection disabled. Verify your `MCP_PUBLIC_URL` matches the external URL.
-
-**"X-Forwarded-For" validation errors**
-The server sets `trust proxy = 1` for single-proxy setups. If you have multiple proxy layers, adjust this value in `src/index.ts`.
-
-**OAuth "unauthorized_client" from Halo**
-Halo only supports Client Credentials grant. The MCP server handles the protocol translation automatically. Verify your Halo API application is configured for "Client ID and Secret (Services)", not Authorization Code.
-
-**n8n "Could not load list"**
-Verify the MCP Endpoint URL includes `/mcp` at the end (e.g., `https://your-url.com/mcp`). Use the **PKCE** grant type in n8n's credential, not plain Authorization Code.
-
-**Token expires during long sessions**
-The server caches tokens and auto-refreshes them 60 seconds before expiry. In OAuth proxy mode, the server retains client credentials for the session lifetime and re-authenticates via Client Credentials grant automatically. Sessions survive indefinitely without manual re-authentication.
-
-## Security
-
-### Transport
-
-The server runs plain HTTP internally. **TLS must be terminated by a reverse proxy** (nginx, Caddy, Traefik, etc.) in production. Set `MCP_PUBLIC_URL` to your external `https://` URL so OAuth metadata and redirects resolve correctly.
-
-### Security Headers
-
-All HTTP responses include the following headers:
-
-| Header | Value |
-|--------|-------|
-| `X-Content-Type-Options` | `nosniff` |
-| `X-Frame-Options` | `DENY` |
-| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` |
-| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` |
-| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
-
-### Input Validation
-
-- All tool inputs are validated with Zod schemas before reaching the Halo API
-- String parameters enforce maximum length limits (50-2000 characters depending on field)
-- Array filter parameters are capped at 100 items
-- Upsert data objects are limited to 512KB when serialized
-- Request bodies are limited to 1MB via Express middleware
-
-### Timeouts and Resilience
-
-- All outbound fetch calls to Halo enforce a 10-15 second timeout via `AbortController`
-- Rate limiter, circuit breaker, and retry logic protect against API overuse (see [Rate Limiting and Resilience](#rate-limiting-and-resilience))
-
-### Secret Handling
-
-- Client secrets captured during OAuth flows are retained in memory for the duration of the session to support automatic token refresh, and expire after a 24-hour TTL
-- The logger redacts 15+ sensitive field patterns (tokens, secrets, passwords, API keys) in both snake_case and camelCase
-- Error messages returned to clients are sanitized; detailed error information is only written to server-side logs
-- The `.env` file is excluded from both git and Docker builds
-
-### Docker Hardening
-
-The Docker Compose configuration enforces:
-
-- **Non-root user** (`mcp:mcp`)
-- **Read-only filesystem** with tmpfs for `/tmp`
-- **`no-new-privileges`** security option
-- **Health check** at `/health`
-
-### URL Validation
-
-`HALO_BASE_URL` is validated at startup to ensure it is a well-formed `http://` or `https://` URL. Invalid URLs cause an immediate exit with a descriptive error.
-
-### Reporting Vulnerabilities
-
-If you discover a security vulnerability, please open an issue at [github.com/omichelbraga/halo-itsm-mcp/issues](https://github.com/omichelbraga/halo-itsm-mcp/issues).
-
-## License
-
-MIT
+MIT. See [LICENSE](LICENSE). Original work by omichelbraga ([halo-itsm-mcp](https://github.com/omichelbraga/halo-itsm-mcp)).

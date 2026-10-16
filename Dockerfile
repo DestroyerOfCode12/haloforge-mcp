@@ -1,5 +1,5 @@
 # ============================================
-# Halo ITSM MCP Server - Docker Image
+# HaloForge MCP | Docker image
 # ============================================
 # Multi-stage build: compile TypeScript, then run slim
 
@@ -46,6 +46,10 @@ EXPOSE 3000
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:3000/health || exit 1
+
+# Writable audit log directory (mount a volume here)
+RUN mkdir -p /app/logs && chown mcp:mcp /app/logs
+ENV HALO_AUDIT_LOG=/app/logs/audit.jsonl
 
 # Run as non-root
 USER mcp
