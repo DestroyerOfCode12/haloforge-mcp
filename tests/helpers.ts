@@ -79,7 +79,7 @@ export function auditPath(): string {
 export function harness(env: NodeJS.ProcessEnv, audit = auditPath()) {
   const { instances, defaultName } = loadInstances(env);
   const manager = new InstanceManager(instances, defaultName, { maxRetries: 2, baseBackoffMs: 1 });
-  const tools = buildAllTools(manager, new AuditLog(audit));
+  const tools = buildAllTools(manager, new AuditLog(audit), env);
   const call = async (name: string, args: Record<string, unknown> = {}) => {
     const tool: RegisteredTool | undefined = tools.get(name);
     if (!tool) throw new Error(`Tool ${name} is not registered`);
